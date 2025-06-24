@@ -497,8 +497,19 @@ class LoginDialog(QDialog):
 
         # Close database connection if open
         if self.conn:
-            self.conn.close()
+            try:
+                self.conn.close()
+            except Exception as e:
+                logger.warning("Error closing DB connection: %s", e)
             self.conn = None
+
+        # Clean up db_handler if present
+        if hasattr(self, "db_handler") and self.db_handler:
+            try:
+                self.db_handler.cleanup()
+            except Exception as e:
+                logger.warning("Error cleaning up db_handler: %s", e)
+            self.db_handler = None
 
         self.reset_form()  # Clear form fields
         QMessageBox.information(self, "Logout", "Logged out and disconnected from database.")

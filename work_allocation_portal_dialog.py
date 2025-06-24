@@ -10,7 +10,7 @@ from PyQt5 import uic
 from .work_allocation_portal_viewer import Ui_Dialog
 from .conflict_listener import PostgresListener, is_field_editable
 import inspect
-from PyQt5.QtWidgets import QApplication, QTableWidgetItem
+from PyQt5.QtWidgets import QApplication
 from .db_handler import signal_bus
 from qgis.core import QgsProject
 from qgis.utils import iface
@@ -22,184 +22,82 @@ from .constants import (
     RFDB_PRODUCTION_STATUS_VALUES, RFDB_QC_STATUS_VALUES,
     SILOC_STATUS_VALUES, DELIVERY_STATUS_VALUES, DATE_COLUMNS
 )
-from .form_features import UndoRedoDelegate, ComboBoxDelegate, DateDelegate
+from .form_features import UndoRedoDelegate, ComboBoxDelegate, DateDelegate, CellEditCommand, GroupEditCommand
+from .work_allocation_table_model import WorkAllocationTableModel  
+from PyQt5.QtWidgets import QTableView
+from PyQt5.QtCore import QSortFilterProxyModel, QItemSelectionModel
+from .column_filter_proxy_model import ColumnFilterProxyModel
 
 
-class NumericTableWidgetItem(QTableWidgetItem):
-    def __init__(self, value):
-        super().__init__(str(value))
-        self.value = value
-    def __lt__(self, other):
-        try:
-            return float(self.value) < float(other.value)
-        except Exception:
-            return str(self.value) < str(other.value)
 
-class DateTableWidgetItem(QTableWidgetItem):
-    def __init__(self, value):
-        super().__init__(str(value))
-        self.value = value
-    def __lt__(self, other):
-        try:
-            from dateutil.parser import parse
-            return parse(self.value) < parse(other.value)
-        except Exception:
-            return str(self.value) < str(other.value)
+# class NumericTableWidgetItem(QTableWidgetItem):
+#     def __init__(self, value):
+#         super().__init__(str(value))
+#         self.value = value
 
-class CellEditCommand(QUndoCommand):
-    def __init__(self, dialog, s_no, col_name, old_value, new_value):
-        super().__init__("Edit Cell")
-        self.dialog = dialog
-        self.s_no = s_no
-        self.col_name = col_name
-        self.old_value = old_value
-        self.new_value = new_value
+#     def __lt__(self, other):
+#         try:
+#             return float(self.value) < float(other.value)
+#         except Exception:
+#             return str(self.value) < str(other.value)
 
-    def _find_row_col(self):
-        s_no_idx = self.dialog.columns.index("s_no")
-        col_idx = self.dialog.columns.index(self.col_name)
-        for row in range(self.dialog.ui.tableWidget.rowCount()):
-            s_no_item = self.dialog.ui.tableWidget.item(row, s_no_idx)
-            if s_no_item and s_no_item.text() == self.s_no:
-                return row, col_idx
-        return None, None
+# class DateTableWidgetItem(QTableWidgetItem):
+#     def __init__(self, value):
+#         super().__init__(str(value))
+#         self.value = value
+#     def __lt__(self, other):
+#         try:
+#             from dateutil.parser import parse
+#             return parse(self.value) < parse(other.value)
+#         except Exception:
+#             return str(self.value) < str(other.value)
 
-    def undo(self):
-        print(f"[UNDO] Cell ({self.s_no}, {self.col_name}) reverting to '{self.old_value}'")
-        self.dialog._is_undo_redo = True
-        row, col = self._find_row_col()
-        if row is not None and col is not None:
-            item = self.dialog.ui.tableWidget.item(row, col)
-            if item:
-                self.dialog.ui.tableWidget.blockSignals(True)
-                item.setText("" if self.old_value is None else str(self.old_value))
-                self.dialog.ui.tableWidget.blockSignals(False)
-                self.dialog.handle_cell_changed(row, col)
-        self.dialog._is_undo_redo = False
-
-    def redo(self):
-        #print(f"[REDO] Cell ({self.s_no}, {self.col_name}) setting to '{self.new_value}'")
-        self.dialog._is_undo_redo = True
-        row, col = self._find_row_col()
-        if row is not None and col is not None:
-            item = self.dialog.ui.tableWidget.item(row, col)
-            if item:
-                self.dialog.ui.tableWidget.blockSignals(True)
-                item.setText("" if self.new_value is None else str(self.new_value))
-                self.dialog.ui.tableWidget.blockSignals(False)
-                self.dialog.handle_cell_changed(row, col)
-        self.dialog._is_undo_redo = False
-
-class GroupEditCommand(QUndoCommand):
-    def __init__(self, dialog, edits):
-        super().__init__("Group Paste")
-        self.dialog = dialog
-        self.edits = edits  # List of (row, col, old_value, new_value)
-
-    def _find_row_col(self, s_no, col_name):
-        s_no_idx = self.dialog.columns.index("s_no")
-        col_idx = self.dialog.columns.index(col_name)
-        for row in range(self.dialog.ui.tableWidget.rowCount()):
-            s_no_item = self.dialog.ui.tableWidget.item(row, s_no_idx)
-            if s_no_item and s_no_item.text() == s_no:
-                return row, col_idx
-        return None, None
-
-    def undo(self):
-        self.dialog._is_undo_redo = True
-        for s_no, col_name, old_value, new_value in reversed(self.edits):
-            row, col = self._find_row_col(s_no, col_name)
-            if row is not None and col is not None:
-                item = self.dialog.ui.tableWidget.item(row, col)
-                if item:
-                    self.dialog.ui.tableWidget.blockSignals(True)
-                    item.setText("" if old_value is None else str(old_value))
-                    self.dialog.ui.tableWidget.blockSignals(False)
-                    self.dialog.handle_cell_changed(row, col)
-        self.dialog._is_undo_redo = False
-
-    def redo(self):
-        self.dialog._is_undo_redo = True
-        for s_no, col_name, old_value, new_value in self.edits:
-            row, col = self._find_row_col(s_no, col_name)
-            if row is not None and col is not None:
-                item = self.dialog.ui.tableWidget.item(row, col)
-                if item:
-                    self.dialog.ui.tableWidget.blockSignals(True)
-                    item.setText("" if new_value is None else str(new_value))
-                    self.dialog.ui.tableWidget.blockSignals(False)
-                    self.dialog.handle_cell_changed(row, col)
-        self.dialog._is_undo_redo = False
 
 class FilterManager:
     """Manages per-column filtering using header ▼ icons (sorting remains enabled)."""
 
-    def __init__(self, tableWidget):
-        self.tableWidget = tableWidget
+    def __init__(self, tableView, model):
+        self.tableView = tableView
+        self.model = model
         self.filter_mode_enabled = False
         self._column_filters = {}
-        self.original_headers = []
-        self._filter_value_pool = {}  
+        self.original_headers = list(model.header_labels)
+        self._filter_value_pool = {}
 
     def create_filter(self):
-        """Toggles filter mode by updating header text and activating section clicks."""
-        # Save the current selection before toggling the filter
-        selected_cells = self.tableWidget.parent().get_selected_cells_by_id()
-
-        col_count = self.tableWidget.columnCount()
+        selected_cells = self.tableView.parent().get_selected_cells_by_id()
 
         if not self.filter_mode_enabled:
-            # Store original header names
-            self.original_headers = [
-                self.tableWidget.horizontalHeaderItem(i).text()
-                if self.tableWidget.horizontalHeaderItem(i) else f"Column {i}"
-                for i in range(col_count)
-            ]
-
-            # Add ▼ icon to header labels
-            for i in range(col_count):
-                item = self.tableWidget.horizontalHeaderItem(i)
-                if item and "▼" not in item.text():
-                    item.setText(f"{item.text()} ▼")
-
-            # Connect header clicks to open filter dialog
-            self.tableWidget.horizontalHeader().sectionClicked.connect(self._handle_header_click)
+            # Add ▼ to headers
+            self.original_headers = list(self.model.header_labels)
+            self.model.set_header_labels([f"{h} ▼" for h in self.original_headers])
+            self.tableView.horizontalHeader().sectionClicked.connect(self._handle_header_click)
             self.filter_mode_enabled = True
-
         else:
-            # Remove filter mode: restore headers, disconnect, clear filters
-            for i, orig in enumerate(self.original_headers):
-                item = self.tableWidget.horizontalHeaderItem(i)
-                if item:
-                    # Remove both ▼ and 🔽 icons from header text
-                    base = orig.replace(" ▼", "").replace("🔽", "")
-                    item.setText(base)
+            # Reset header labels and filters
+            self.model.set_header_labels(self.original_headers)
             try:
-                self.tableWidget.horizontalHeader().sectionClicked.disconnect(self._handle_header_click)
+                self.tableView.horizontalHeader().sectionClicked.disconnect(self._handle_header_click)
             except Exception:
                 pass
             self.filter_mode_enabled = False
             self._column_filters.clear()
             self.apply_column_filters()
         self.update_header_icons()
-
-        # Restore the selection after toggling the filter
-        self.tableWidget.parent().restore_selection_by_id(selected_cells)
+        self.tableView.clearSelection()
 
     def _handle_header_click(self, index):
-        """Open column filter dialog when ▼ icon header is clicked."""
         if self.filter_mode_enabled:
+            self.tableView.clearSelection()  # <-- Add this line
             self.open_column_filter_dialog(index)
 
     def open_column_filter_dialog(self, index):
-        """Open the custom UI dialog for filtering values in a specific column."""
-        if index >= self.tableWidget.columnCount():
+        if index >= len(self.model.header_labels):
             return
 
         col_name = self.original_headers[index]
         current_filter = self._column_filters.get(col_name, None)
 
-        # Helper for robust sorting
         def try_num(val):
             if val is None or str(val).strip() == "" or str(val).lower() == "none":
                 return (0, float('-inf'))
@@ -209,14 +107,11 @@ class FilterManager:
                 return (2, str(val))
 
         if col_name not in self._filter_value_pool:
-            # --- Apply all filters except the one for this column ---
-            filtered_rows = self.tableWidget.parent().get_filtered_rows_except(col_name)
+            filtered_rows = self.tableView.parent().get_filtered_rows_except(col_name)
             raw_values = [
-                self.tableWidget.item(row, index).text()
+                str(self.model.index(row, index).data())
                 for row in filtered_rows
-                if self.tableWidget.item(row, index)
             ]
-            # Remove duplicates while preserving order
             seen = set()
             values = []
             for v in raw_values:
@@ -228,28 +123,24 @@ class FilterManager:
         else:
             values = self._filter_value_pool[col_name]
 
-        # Load custom filter dialog
         ui_path = os.path.join(os.path.dirname(__file__), "custom_attribute_table_filter.ui")
-        dialog = QtWidgets.QDialog(self.tableWidget)
+        dialog = QtWidgets.QDialog(self.tableView)
         dialog.setModal(True)
         uic.loadUi(ui_path, dialog)
         dialog.setWindowTitle(f"Filter: {col_name}")
 
-        # Remove the old listWidget from the layout if it exists
         layout = dialog.findChild(QtWidgets.QVBoxLayout, "verticalLayout")
         old_widget = dialog.findChild(QtWidgets.QListWidget, "listWidget")
         if old_widget and layout:
             layout.removeWidget(old_widget)
             old_widget.deleteLater()
 
-        # Add your custom CheckableListWidget
-        list_widget = self.tableWidget.parent().CheckableListWidget()
+        list_widget = self.tableView.parent().CheckableListWidget()
         list_widget.setObjectName("listWidget")
         list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         if layout:
-            layout.insertWidget(1, list_widget)  # Insert after the search box
+            layout.insertWidget(1, list_widget)
 
-        # Populate the list_widget with checkable items
         for val in values:
             item = QtWidgets.QListWidgetItem(val)
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
@@ -259,9 +150,6 @@ class FilterManager:
                 item.setCheckState(Qt.Checked)
             list_widget.addItem(item)
 
-        # Spacebar toggling is handled by your CheckableListWidget class
-
-        # Hook up buttons
         select_all_btn = dialog.findChild(QtWidgets.QPushButton, "selectAllButton")
         clear_btn = dialog.findChild(QtWidgets.QPushButton, "clearButton")
         if select_all_btn:
@@ -269,7 +157,6 @@ class FilterManager:
         if clear_btn:
             clear_btn.clicked.connect(lambda: [list_widget.item(i).setCheckState(Qt.Unchecked) for i in range(list_widget.count())])
 
-        # Hook up search box
         search_box = dialog.findChild(QtWidgets.QLineEdit, "searchBox")
         if search_box:
             def filter_items(text):
@@ -278,7 +165,6 @@ class FilterManager:
                     item.setHidden(text.lower() not in item.text().lower())
             search_box.textChanged.connect(filter_items)
 
-        # Dialog button signals
         button_box = dialog.findChild(QtWidgets.QDialogButtonBox, "buttonBox")
         if button_box:
             button_box.accepted.connect(dialog.accept)
@@ -290,56 +176,43 @@ class FilterManager:
                 self._column_filters[col_name] = checked_values
             else:
                 self._column_filters.pop(col_name, None)
-                self._filter_value_pool.pop(col_name, None)  # Remove pool if filter is cleared
+                self._filter_value_pool.pop(col_name, None)
             self.apply_column_filters()
 
     def apply_column_filters(self):
-        """Apply the current filters to the table rows."""
-        # Save the current selection before filtering
-        selected_cells = self.tableWidget.parent().get_selected_cells_by_id()
+        # Save selection BEFORE filtering
+        self._pre_filter_selection = self.tableView.parent().get_selected_cells_by_id()
 
-        headers = [
-            self.original_headers[i] if i < len(self.original_headers)
-            else self.tableWidget.horizontalHeaderItem(i).text().replace(" ▼", "")
-            for i in range(self.tableWidget.columnCount())
-        ]
-
-        for row in range(self.tableWidget.rowCount()):
-            show_row = True
-            for col_name, allowed_values in self._column_filters.items():
-                try:
-                    col_idx = headers.index(col_name)
-                except ValueError:
-                    continue
-                item = self.tableWidget.item(row, col_idx)
-                if item is None or item.text() not in allowed_values:
-                    show_row = False
-                    break
-            self.tableWidget.setRowHidden(row, not show_row)
+        # Build filters as {col_index: set(allowed_values)}
+        filters = {}
+        for col_name, allowed_values in self._column_filters.items():
+            col_idx = self.original_headers.index(col_name)
+            filters[col_idx] = allowed_values
+        self.tableView.model().set_column_filters(filters)  # Use the proxy model's method
 
         if not self._column_filters:
             self._filter_value_pool.clear()
         self.update_header_icons()
 
-        # Restore the selection after filtering
-        self.tableWidget.parent().restore_selection_by_id(selected_cells)
-            
+        # Only restore selection if there was a user selection before filtering
+        if hasattr(self, "_pre_filter_selection") and self._pre_filter_selection:
+            #print("[DEBUG]Restoring selection:", self._pre_filter_selection)
+            self.tableView.parent().restore_selection_by_id(self._pre_filter_selection)
+        else:
+            print("Clearing selection")
+            self.tableView.clearSelection()
+
     def update_header_icons(self):
-        """Update header icons: show '▼' for normal, '🔽' for filtered columns, or plain if no filter."""
-        for i in range(self.tableWidget.columnCount()):
-            col_name = self.original_headers[i]
-            item = self.tableWidget.horizontalHeaderItem(i)
-            if item:
-                base = col_name.replace(" ▼", "").replace("🔽", "")
-                if self.filter_mode_enabled:
-                    if col_name in self._column_filters:
-                        item.setText(f"{base} 🔽")
-                    else:
-                        item.setText(f"{base} ▼")
+        for i, col_name in enumerate(self.original_headers):
+            base = col_name.replace(" ▼", "").replace("🔽", "")
+            if self.filter_mode_enabled:
+                if col_name in self._column_filters:
+                    self.model.set_header_label(i, f"{base} 🔽")
                 else:
-                    # Filter mode is off: show plain header (no icons)
-                    item.setText(base)
-            
+                    self.model.set_header_label(i, f"{base} ▼")
+            else:
+                self.model.set_header_label(i, base)
+        
 
 class WorkAllocationPortalViewerDialog(QDialog):
 
@@ -392,26 +265,34 @@ class WorkAllocationPortalViewerDialog(QDialog):
         self.user_role = user_role
         self.table_name = table_name
         self.subcountry = subcountry
-        self.emp_id = emp_id  # <-- set emp_id!
+        self.emp_id = emp_id
         self.qgis_layer = qgis_layer
         self.columns = self.columns.get(self.table_name, [])
         self.editable_fields = EDITABLE_FIELDS.get(self.table_name, {}).get(self.user_role, [])
 
-        # --- Set project for row-wise restriction logic ---
-        if self.table_name == '"public"."tm_production_inputs"':
-            self.project = "turn_maneuver_project"
-        elif self.table_name == '"public"."production_inputs"':
-            self.project = "rfdb_project"
-        else:
-            self.project = None
+        self.project = {
+            '"public"."tm_production_inputs"': "turn_maneuver_project",
+            '"public"."production_inputs"': "rfdb_project"
+        }.get(self.table_name, None)
 
         self.ui = Ui_Dialog()
         self.ui.setupUi(self)
-        #self.ui.tableWidget.setEditTriggers(QtWidgets.QAbstractItemView.EditKeyPressed | QtWidgets.QAbstractItemView.SelectedClicked)
+
+        # --- Hide and remove the old QTableWidget ---
+        self.ui.tableWidget.hide()
+        self.ui.verticalLayout.removeWidget(self.ui.tableWidget)
+        self.ui.tableWidget.deleteLater()
+
+        # Now add your new QTableView
+        self.ui.tableView = QTableView(self)
+        self.ui.verticalLayout.insertWidget(0, self.ui.tableView)
 
         self.setWindowTitle("Work Allocation Portal Viewer/Editor")
         self.setWindowFlags(self.windowFlags() | Qt.WindowMinMaxButtonsHint)
         signal_bus.logout_signal.connect(self.cleanup_on_logout)
+
+        self.ui.tableView.setSelectionBehavior(QTableView.SelectItems)
+        self.ui.tableView.setSelectionMode(QTableView.ExtendedSelection)
 
         # Set icons
         icon_dir = os.path.join(os.path.dirname(__file__), "icon")
@@ -428,22 +309,24 @@ class WorkAllocationPortalViewerDialog(QDialog):
         self.ui.Zoom_to_feature.setToolTip("Zoom to Feature")
         self.ui.Create_filter.setToolTip("Filter")
 
+        # Undo/redo & editing setup
         self.undo_stack = QUndoStack(self)
         self._cell_prev_values = {}
         self._is_undo_redo = False
         self._is_group_paste = False
-        self.delegate = UndoRedoDelegate(self.ui.tableWidget, self._cell_prev_values)
-        self.ui.tableWidget.setItemDelegate(self.delegate)
 
-        self.ui.tableWidget.installEventFilter(self)
-        self.ui.tableWidget.viewport().installEventFilter(self)
+        # Delegate setup
+        self.delegate = UndoRedoDelegate(self.ui.tableView, self._cell_prev_values, self)
+        self.ui.tableView.setItemDelegate(self.delegate)
 
-        self.ui.tableWidget.setDragDropMode(self.ui.tableWidget.NoDragDrop)
-        self.ui.tableWidget.setDragEnabled(False)
-        self.ui.tableWidget.setDropIndicatorShown(False)
-        self.ui.tableWidget.setDefaultDropAction(Qt.IgnoreAction)
+        self.ui.tableView.installEventFilter(self)
+        self.ui.tableView.viewport().installEventFilter(self)
 
-        
+        self.ui.tableView.setDragDropMode(QTableView.NoDragDrop)
+        self.ui.tableView.setDragEnabled(False)
+        self.ui.tableView.setDropIndicatorShown(False)
+        self.ui.tableView.setDefaultDropAction(Qt.IgnoreAction)
+
         self.quoted_table = self.table_name
         try:
             self.schema, self.table = self.table_name.replace('"', '').split('.')
@@ -451,39 +334,40 @@ class WorkAllocationPortalViewerDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Invalid table format: {self.table_name}")
             self.schema, self.table = "public", "production_inputs"
 
-        self.quoted_table = self.table_name  # Already quoted form is used for all SQL
-        self.col_types = {}  # Will be filled once
+        self.col_types = {}
         self._suppress_cell_changed = False
         self._suppress_invalid_empid_popup = False
-        self.load_column_types()
+        self.model = None
+        self.proxy_model = None
 
+        self.load_column_types()
         self.refresh_table()
+
         self.ui.Refresh.clicked.connect(self.refresh_table)
-        self.ui.tableWidget.cellChanged.connect(self.handle_cell_changed)
         self.ui.Organize_columns.clicked.connect(self.organize_columns)
         self.ui.Zoom_to_feature.clicked.connect(self.zoom_to_selected_row_on_map)
         self.ui.Create_filter.clicked.connect(self.create_filter)
-        self._suppress_invalid_empid_popup = False
 
-        self.filter_manager = FilterManager(self.ui.tableWidget)
+        self.filter_manager = FilterManager(self.ui.tableView, self.model)
 
-        # PostgreSQL listener for real-time updates
+        # PostgreSQL listener
         dsn = self.db_handler.get_dsn()
         self.pg_listener = PostgresListener(dsn, "production_inputs_update")
         self.pg_listener.notified.connect(self.handle_db_notify)
 
+        # Combo box delegates
         self.combo_delegates = {}
         for col_idx, field_name in enumerate(self.columns):
             if field_name in self.DROPDOWN_COLUMNS:
-                delegate = ComboBoxDelegate(self.DROPDOWN_COLUMNS[field_name], self.ui.tableWidget)
-                self.ui.tableWidget.setItemDelegateForColumn(col_idx, delegate)
+                delegate = ComboBoxDelegate(self.DROPDOWN_COLUMNS[field_name], self.ui.tableView)
+                self.ui.tableView.setItemDelegateForColumn(col_idx, delegate)
                 self.combo_delegates[field_name] = delegate
 
-        # Date columns (add this block)
-        date_delegate = DateDelegate(self.ui.tableWidget)
+        # Date column delegates
+        date_delegate = DateDelegate(self.ui.tableView)
         for col_idx, field_name in enumerate(self.columns):
             if field_name in DATE_COLUMNS:
-                self.ui.tableWidget.setItemDelegateForColumn(col_idx, date_delegate)
+                self.ui.tableView.setItemDelegateForColumn(col_idx, date_delegate)
 
     def create_filter(self):
         """Toggles the filter UI."""
@@ -492,38 +376,37 @@ class WorkAllocationPortalViewerDialog(QDialog):
     def get_selected_cells_by_id(self):
         """Return a list of (s_no, col_name) for all selected cells."""
         selected = []
+        indexes = self.ui.tableView.selectedIndexes()
         s_no_idx = self.columns.index("s_no")
-        for item in self.ui.tableWidget.selectedItems():
-            row = item.row()
-            col = item.column()
-            s_no_item = self.ui.tableWidget.item(row, s_no_idx)
-            if s_no_item:
-                s_no = s_no_item.text()
-                col_name = self.columns[col]
-                selected.append((s_no, col_name))
-        #print(f"[DEBUG] Selected cells: {selected}")  # Debug line
+
+        for index in indexes:
+            row, col = index.row(), index.column()
+            s_no = str(self.model.index(row, s_no_idx).data())
+            col_name = self.columns[col]
+            selected.append((s_no, col_name))
+
         return selected
 
     def get_selected_cell_values(self):
         """Return a list of (s_no, col_name, value) for all selected cells."""
         selected = []
+        indexes = self.ui.tableView.selectedIndexes()
         s_no_idx = self.columns.index("s_no")
-        for item in self.ui.tableWidget.selectedItems():
-            row = item.row()
-            col = item.column()
-            s_no_item = self.ui.tableWidget.item(row, s_no_idx)
-            if s_no_item:
-                s_no = s_no_item.text()
-                col_name = self.columns[col]
-                value = item.text() if item else ""
-                selected.append((s_no, col_name, value))
-        #print(f"[DEBUG] Selected cell values: {selected}")  # Debug line
+
+        for index in indexes:
+            row, col = index.row(), index.column()
+            s_no = str(self.model.index(row, s_no_idx).data())
+            col_name = self.columns[col]
+            value = str(self.model.index(row, col).data())
+            selected.append((s_no, col_name, value))
+
         return selected
 
     def get_filtered_rows_except(self, exclude_col_name):
-        headers = self.columns  # Use original column names
+        """Return row indices that pass all filters except the given column."""
+        headers = self.columns
         filtered_rows = []
-        for row in range(self.ui.tableWidget.rowCount()):
+        for row in range(self.model.rowCount()):
             match = True
             for col_name, allowed_values in self.filter_manager._column_filters.items():
                 if col_name == exclude_col_name:
@@ -531,31 +414,26 @@ class WorkAllocationPortalViewerDialog(QDialog):
                 try:
                     col_idx = headers.index(col_name)
                 except ValueError:
-                    continue  # Skip if column not found
-                item = self.ui.tableWidget.item(row, col_idx)
-                if item is None or item.text() not in allowed_values:
+                    continue
+                value = self.model.index(row, col_idx).data()
+                if value not in allowed_values:
                     match = False
                     break
             if match:
                 filtered_rows.append(row)
         return filtered_rows
 
+
     def refresh_table(self):
         if not self.columns:
             QMessageBox.critical(self, "Error", "No columns defined for the selected table.")
             return
-        print(f"[DEBUG] Fetching data from table: {self.quoted_table}")  # <-- Add this line
-        # stack = inspect.stack()  # Get the name of the calling function      #[DEBUG]
-        # print("[DEBUG] Refresh Triggered by stack:")                         #[DEBUG]
-        # for frame in stack[1:4]:  # Show up to 3 levels above                #[DEBUG]
-        #     print(f"  called by: {frame.function} (line {frame.lineno})")    #[DEBUG]
-        self.ui.tableWidget.blockSignals(True)
-        self.ui.tableWidget.setSortingEnabled(False)
-        self.ui.tableWidget.horizontalHeader().setSectionsClickable(True)
+
+        print(f"[DEBUG] Fetching data from table: {self.quoted_table}")
 
         cur = self.db_handler.conn.cursor()
 
-        # Fetch column types (unchanged)
+        # --- Fetch column types ---
         format_str = ','.join(['%s'] * len(self.columns))
         query = f"""
             SELECT column_name, data_type
@@ -569,71 +447,68 @@ class WorkAllocationPortalViewerDialog(QDialog):
         column_info = cur.fetchall()
         self.col_types = {name: dtype for name, dtype in column_info}
 
-        # Fetch actual data, filtered by subcountry if set
+        # --- Fetch data ---
         if self.subcountry and self.subcountry != "All subcountry":
             sql = f"SELECT {', '.join(self.columns)} FROM {self.quoted_table} WHERE subcountry = %s ORDER BY s_no"
             cur.execute(sql, (self.subcountry,))
         else:
             sql = f"SELECT {', '.join(self.columns)} FROM {self.quoted_table} ORDER BY s_no"
             cur.execute(sql)
+
         data = cur.fetchall()
         cur.close()
 
-        columns = self.columns
-
-        self.ui.tableWidget.setColumnCount(len(columns))
-        self.ui.tableWidget.setHorizontalHeaderLabels(columns)
-        self.ui.tableWidget.setRowCount(0)
-        self.ui.tableWidget.setRowCount(len(data))
-
-        for row_idx, row in enumerate(data):
-            # Build a dict of column_name: value for this row
+        # --- Convert data to dict list ---
+        row_dicts = []
+        for row in data:
             row_data = {self.columns[c]: row[c] for c in range(len(self.columns))}
-            for col_idx, value in enumerate(row):
-                field_name = columns[col_idx]
-                dtype = self.col_types.get(field_name, "text")
+            row_dicts.append(row_data)
 
-                if field_name == "s_no":
-                    item = NumericTableWidgetItem(value)
-                elif dtype in ("integer", "numeric", "double precision"):
-                    item = NumericTableWidgetItem(value)
-                elif dtype in ("date", "timestamp without time zone"):
-                    item = DateTableWidgetItem(value)
-                else:
-                    item = QTableWidgetItem("" if value is None else str(value))
+        # --- Initialize model ---
+        self.model = WorkAllocationTableModel(
+            data=row_dicts,
+            headers=self.columns,
+            editable_fields=self.editable_fields,
+            emp_id=self.emp_id,
+            user_role=self.user_role,
+            table_name=self.table_name,
+            project=self.project,
+            original_headers=self.columns  # <-- Pass the original column names here
+        )
 
-                # Row/column-wise editability check
-                if not is_field_editable(
-                        self.user_role,
-                        field_name,
-                        row_data,
-                        getattr(self, "emp_id", None),
-                        project=getattr(self, "project", None),
-                        table_name=self.table_name  # <-- pass the table name!
-                    ):
-                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                    item.setBackground(QColor(180, 180, 180))  # Gray out
+        # --- Connect dataChanged signal to your handler ---
+        self.model.dataChanged.connect(self.on_data_changed)
 
-                self.ui.tableWidget.setItem(row_idx, col_idx, item)
+        self.proxy_model = ColumnFilterProxyModel()
+        self.proxy_model.setSourceModel(self.model)
+        self.proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
 
+        self.ui.tableView.setModel(self.proxy_model)
+        self.ui.tableView.setSortingEnabled(False)
+
+        if hasattr(self, "filter_manager"):
+            self.filter_manager.model = self.model
+
+        # --- Hide certain columns ---
         for col_name in ("geom", "last_updated"):
             if col_name in self.columns:
                 idx = self.columns.index(col_name)
-                self.ui.tableWidget.setColumnHidden(idx, True)
+                self.ui.tableView.setColumnHidden(idx, True)
 
-        self.ui.tableWidget.setVerticalHeaderLabels([str(i + 1) for i in range(len(data))])
-        self.ui.tableWidget.blockSignals(False)
-        self.ui.tableWidget.setSortingEnabled(False)
-        self.ui.tableWidget.horizontalHeader().setSectionsClickable(True)
+        # --- Set header labels (optional with proxy) ---
+        for i, col in enumerate(self.columns):
+            self.ui.tableView.setColumnWidth(i, 120)
+            if col in self.DROPDOWN_COLUMNS:
+                delegate = ComboBoxDelegate(self.DROPDOWN_COLUMNS[col], self.ui.tableView)
+                self.ui.tableView.setItemDelegateForColumn(i, delegate)
+            elif col in DATE_COLUMNS:
+                delegate = DateDelegate(self.ui.tableView)
+                self.ui.tableView.setItemDelegateForColumn(i, delegate)
+
+        self.ui.tableView.viewport().update()
+
 
     def handle_db_notify(self, payload):
-        """
-        Update only the affected rows in the table when a NOTIFY is received.
-        The payload is expected to be a comma‑separated string of primary keys (s_no).
-        For each s_no, the entire row (all columns in self.columns) is fetched from the DB
-        and the corresponding table row is updated.
-        """
-        # Split payload assuming comma-separated s_no values.
         updated_ids = [id.strip() for id in str(payload).split(",") if id.strip()]
         if not updated_ids:
             return
@@ -648,76 +523,44 @@ class WorkAllocationPortalViewerDialog(QDialog):
                 row_data = cur.fetchone()
                 cur.close()
                 if not row_data:
-                    continue  # No record found for this s_no
+                    continue
             except Exception as e:
                 print(f"[DEBUG] Error fetching update for s_no {updated_s_no}: {e}")
                 continue
 
-            # Find the row(s) in the table with this s_no.
-            s_no_idx = self.columns.index("s_no")
-            target_rows = []
-            for row in range(self.ui.tableWidget.rowCount()):
-                item = self.ui.tableWidget.item(row, s_no_idx)
-                if item and item.text() == updated_s_no:
-                    target_rows.append(row)
+            updated_dict = {self.columns[c]: row_data[c] for c in range(len(self.columns))}
 
-            # Update each matching row with new data.
-            for target_row in target_rows:
-                self.ui.tableWidget.blockSignals(True)
-                for col_idx, new_value in enumerate(row_data):
-                    item = self.ui.tableWidget.item(target_row, col_idx)
-                    if not item:
-                        from PyQt5.QtWidgets import QTableWidgetItem
-                        item = QTableWidgetItem("")
-                        self.ui.tableWidget.setItem(target_row, col_idx, item)
-                    item.setText("" if new_value is None else str(new_value))
-                self.ui.tableWidget.blockSignals(False)
+            # Update the model row if s_no matches
+            for row in range(self.model.rowCount()):
+                index = self.model.index(row, self.columns.index("s_no"))
+                s_no_value = self.model.data(index, Qt.DisplayRole)
+                if s_no_value == updated_s_no:
+                    self.model.update_row(row, updated_dict)
+
 
     def handle_cell_changed(self, row, col):
-        item = self.ui.tableWidget.item(row, col)
-        if item is None:
-            print(f"[DEBUG] handle_cell_changed: No item at ({row}, {col})")
-            return
+        index = self.model.index(row, col)
+        item = self.model.data(index, Qt.DisplayRole)
 
-        widget = self.ui.tableWidget.cellWidget(row, col)
-        if isinstance(widget, QComboBox):
-            new_value = widget.currentText()
-        else:
-            new_value = item.text()
-
+        new_value = item
         field_name = self.columns[col]
         col_type = self.col_types.get(field_name, "").lower()
 
-        if (
-            new_value is None
-            or str(new_value).strip() == ""
-            or str(new_value).strip().lower() == "none"
-        ):
+        if new_value in [None, "", "none", "None"]:
             new_value = None
 
-        prev_value = self._cell_prev_values.get((row, col), "")
-        print(f"[DEBUG] handle_cell_changed: ({row}, {col}) field='{field_name}' prev='{prev_value}' new='{new_value}'")
+        s_no_index = self.model.index(row, self.columns.index("s_no"))
+        s_no = self.model.data(s_no_index, Qt.DisplayRole)
+        col_name = self.columns[col]
+        prev_value = self._cell_prev_values.get((s_no, col_name), "")
 
-        if prev_value == new_value:
-            print(f"[DEBUG] handle_cell_changed: No change detected for ({row}, {col})")
+        if prev_value == new_value and not getattr(self, "_is_undo_redo", False):
             return
 
         if not getattr(self, "_is_undo_redo", False) and not getattr(self, "_is_group_paste", False):
-            s_no_item = self.ui.tableWidget.item(row, self.columns.index("s_no"))
-            if s_no_item:
-                s_no = s_no_item.text()
-                col_name = self.columns[col]
-                self.undo_stack.push(CellEditCommand(self, s_no, col_name, prev_value, new_value))
+            self.undo_stack.push(CellEditCommand(self, s_no, col_name, prev_value, new_value))
 
-        # --- Normal field update ---
-        s_no_item = self.ui.tableWidget.item(row, self.columns.index("s_no"))
-        if not s_no_item or not s_no_item.text():
-            print(f"[DEBUG] handle_cell_changed: No s_no found for row {row}")
-            return
-
-        s_no = s_no_item.text()
         try:
-            print(f"[DEBUG] handle_cell_changed: Updating DB: field={field_name}, value={new_value}, s_no={s_no}")
             cur = self.db_handler.conn.cursor()
             cur.execute(
                 f"UPDATE {self.quoted_table} SET {field_name} = %s WHERE s_no = %s",
@@ -726,43 +569,56 @@ class WorkAllocationPortalViewerDialog(QDialog):
             self.db_handler.conn.commit()
             cur.execute(f"NOTIFY production_inputs_update, '{s_no}';")
             cur.close()
-            print(f"[DEBUG] handle_cell_changed: DB update successful for s_no={s_no}, field={field_name}")
         except Exception as e:
-            print(f"[DEBUG] handle_cell_changed: DB update failed: {e}")
             QMessageBox.critical(self, "Update Error", f"Failed to update {field_name}: {e}")
             self.refresh_table()
 
-        self._cell_prev_values[(row, col)] = new_value
+        self._cell_prev_values[(s_no, col_name)] = new_value
+
    
     def copy_cell_values(self):
         """Copy only the values of selected cells to the clipboard, and store metadata mapping in memory."""
-        selected_cells = self.get_selected_cell_values()  # [(s_no, col_name, value), ...]
-        if not selected_cells:
-            #print("[DEBUG] No cells selected for copying.")
+        selected_indexes = self.ui.tableView.selectedIndexes()
+        if not selected_indexes:
             return
+
+        selected_cells = []
+        for index in selected_indexes:
+            row = index.row()
+            col = index.column()
+            s_no_index = self.model.index(row, self.columns.index("s_no"))
+            s_no = self.model.data(s_no_index, Qt.DisplayRole)
+            col_name = self.columns[col]
+            value = self.model.data(index, Qt.DisplayRole)
+            selected_cells.append((s_no, col_name, value))
+
         values_only = [value for _, _, value in selected_cells]
         QApplication.clipboard().setText("\n".join(values_only))
-        # Store the selection mapping for structured paste
         self._structured_clipboard = [(s_no, col_name) for s_no, col_name, _ in selected_cells]
-        # print(f"[DEBUG] Copied values: {values_only}")
-        # print(f"[DEBUG] Structured mapping: {self._structured_clipboard}")
+
 
     def paste_cell_values(self):
         """Paste clipboard values into the currently selected cells using the current selection mapping."""
         text = QApplication.clipboard().text()
         if not text:
-            #print("[DEBUG] Clipboard is empty.")
             return
 
         rows = [line.split('\t') for line in text.splitlines()]
-        selected_cells = self.get_selected_cells_by_id()  # [(s_no, col_name), ...]
-        if not selected_cells:
-            #print("[DEBUG] No cells selected for pasting.")
+        selected_indexes = self.ui.tableView.selectedIndexes()
+        if not selected_indexes:
             return
+
+        selected_cells = []
+        for index in selected_indexes:
+            row = index.row()
+            col = index.column()
+            s_no_index = self.model.index(row, self.columns.index("s_no"))
+            s_no = self.model.data(s_no_index, Qt.DisplayRole)
+            col_name = self.columns[col]
+            selected_cells.append((s_no, col_name))
 
         group_edits = []
         self._is_group_paste = True
-        s_no_idx = self.columns.index("s_no")
 
         num_clip_rows = len(rows)
         num_clip_cols = max(len(r) for r in rows) if rows else 1
@@ -773,25 +629,21 @@ class WorkAllocationPortalViewerDialog(QDialog):
             new_value = rows[row_in_clip][col_in_clip % len(rows[row_in_clip])]
             col_idx = self.columns.index(col_name)
 
-            # --- Dropdown value validation ---
+            # Dropdown validation
             if col_name in self.DROPDOWN_COLUMNS:
                 allowed = self.DROPDOWN_COLUMNS[col_name] + [""]
                 if new_value not in allowed:
-                    continue  # Skip invalid value
-            # ---------------------------------
+                    continue  # Skip invalid
 
-            for row in range(self.ui.tableWidget.rowCount()):
-                s_no_item = self.ui.tableWidget.item(row, s_no_idx)
-                if s_no_item and s_no_item.text() == s_no:
-                    # Only paste if cell is editable
+            for row in range(self.model.rowCount()):
+                s_no_index = self.model.index(row, self.columns.index("s_no"))
+                if self.model.data(s_no_index) == s_no:
                     if not self.is_cell_editable(row, col_idx):
-                        continue  # Skip non-editable cells
-                    item = self.ui.tableWidget.item(row, col_idx)
-                    if item is None:
-                        item = QTableWidgetItem("")
-                        self.ui.tableWidget.setItem(row, col_idx, item)
-                    old_value = item.text()
-                    item.setText(new_value)
+                        continue
+
+                    index = self.model.index(row, col_idx)
+                    old_value = self.model.data(index, Qt.DisplayRole)
+                    self.model.setData(index, new_value, Qt.EditRole)
                     group_edits.append((s_no, col_name, old_value, new_value))
                     self.handle_cell_changed(row, col_idx)
                     break
@@ -799,8 +651,20 @@ class WorkAllocationPortalViewerDialog(QDialog):
         self._is_group_paste = False
 
         if group_edits:
-            #print(f"[DEBUG] Pasted changes: {group_edits}")
             self.undo_stack.push(GroupEditCommand(self, group_edits))
+
+    def is_cell_editable_by_id(self, s_no, col_name):
+        """
+        Return True if the cell identified by s_no and col_name is editable.
+        Used by delegates that work on QModelIndex.
+        """
+        for row in range(self.ui.tableWidget.model().rowCount()):
+            s_no_idx = self.columns.index("s_no")
+            s_no_item = self.ui.tableWidget.model().index(row, s_no_idx).data()
+            if s_no_item == s_no:
+                col_idx = self.columns.index(col_name)
+                return self.is_cell_editable(row, col_idx)
+        return False
 
     def undo(self):
         print("[UNDO] Triggered")
@@ -811,15 +675,13 @@ class WorkAllocationPortalViewerDialog(QDialog):
         self.undo_stack.redo()
 
     def eventFilter(self, obj, event):
-        if obj == self.ui.tableWidget and event.type() == QEvent.KeyPress:
+        if obj == self.ui.tableView and event.type() == QEvent.KeyPress:
             key = event.key()
             modifiers = event.modifiers()
             if key == Qt.Key_C and modifiers & Qt.ControlModifier:
-                # Use copy_cell_values for basic copying
                 self.copy_cell_values()
                 return True
             elif key == Qt.Key_V and modifiers & Qt.ControlModifier:
-                # Use paste_cell_values for basic pasting
                 self.paste_cell_values()
                 return True
             elif key == Qt.Key_Z and modifiers & Qt.ControlModifier:
@@ -829,21 +691,20 @@ class WorkAllocationPortalViewerDialog(QDialog):
                 self.redo()
                 return True
             elif key in (Qt.Key_Delete, Qt.Key_Backspace):
-                # Collect all edits for group undo/redo
                 group_edits = []
-                for item in self.ui.tableWidget.selectedItems():
-                    row, col = item.row(), item.column()
+                indexes = self.ui.tableView.selectedIndexes()
+                self.ui.tableView.blockSignals(True)
+                for index in indexes:
+                    row = index.row()
+                    col = index.column()
                     if self.is_cell_editable(row, col):
-                        prev_value = item.text()
-                        # Always process, even if prev_value is "" or "None"
-                        item.setText("")
-                        self.handle_cell_changed(row, col)  # Update DB immediately
-                        s_no_item = self.ui.tableWidget.item(row, self.columns.index("s_no"))
-                        if s_no_item:
-                            s_no = s_no_item.text()
-                            col_name = self.columns[col]
-                            group_edits.append((s_no, col_name, prev_value, ""))
-                            
+                        old_value = self.model.data(index, Qt.DisplayRole)
+                        self.model.setData(index, "", Qt.EditRole)
+                        s_no_index = self.model.index(row, self.columns.index("s_no"))
+                        s_no = self.model.data(s_no_index, Qt.DisplayRole)
+                        col_name = self.columns[col]
+                        group_edits.append((s_no, col_name, old_value, ""))
+                self.ui.tableView.blockSignals(False)
                 if group_edits:
                     self.undo_stack.push(GroupEditCommand(self, group_edits))
                 return True
@@ -852,7 +713,7 @@ class WorkAllocationPortalViewerDialog(QDialog):
     def sort_by_sno(self):
         if "s_no" in self.columns:
             s_no_idx = self.columns.index("s_no")
-            self.ui.tableWidget.sortItems(s_no_idx, Qt.AscendingOrder)
+            self.ui.tableView.sortByColumn(s_no_idx, Qt.AscendingOrder)
     
     def cleanup_on_logout(self):
         if hasattr(self, "pg_listener"):
@@ -883,18 +744,23 @@ class WorkAllocationPortalViewerDialog(QDialog):
 
     def is_cell_editable(self, row, col):
         field_name = self.columns[col]
-        # Build row_data as a dict of column_name: value for this row
-        row_data = {self.columns[c]: self.ui.tableWidget.item(row, c).text() for c in range(self.ui.tableWidget.columnCount())}
-        # Pass project name if available (set self.project in __init__ if needed)
+        row_data = {
+            self.columns[c]: self.model.data(self.model.index(row, c), Qt.DisplayRole)
+            for c in range(len(self.columns))
+        }
         return is_field_editable(
             self.user_role,
             field_name,
             row_data,
             getattr(self, "emp_id", None),
             project=getattr(self, "project", None),
-            table_name=self.table_name  # <-- pass the table name!
+            table_name=self.table_name
         )
-
+    
+    def on_data_changed(self, topLeft, bottomRight, roles):
+        for row in range(topLeft.row(), bottomRight.row() + 1):
+            for col in range(topLeft.column(), bottomRight.column() + 1):
+                self.handle_cell_changed(row, col)
 
     class CheckableListWidget(QtWidgets.QListWidget):
         def keyPressEvent(self, event):
@@ -910,12 +776,8 @@ class WorkAllocationPortalViewerDialog(QDialog):
             super().keyPressEvent(event)
 
     def organize_columns(self):
-        """Display a dialog to let users reorder and show/hide columns."""
-        # Show all columns, not just visible ones
-        all_cols = [
-            self.ui.tableWidget.horizontalHeaderItem(i).text().replace(" ▼", "")
-            for i in range(self.ui.tableWidget.columnCount())
-        ]
+        """Display a dialog to let users reorder and show/hide columns in QTableView."""
+        all_cols = self.columns[:]
 
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle("Organize Columns")
@@ -925,6 +787,7 @@ class WorkAllocationPortalViewerDialog(QDialog):
         search = QtWidgets.QLineEdit()
         search.setPlaceholderText("Search columns...")
         layout.addWidget(search)
+
         btn_row = QtWidgets.QHBoxLayout()
         select_all_btn = QtWidgets.QPushButton("Select All")
         clear_btn = QtWidgets.QPushButton("Clear")
@@ -937,7 +800,9 @@ class WorkAllocationPortalViewerDialog(QDialog):
         list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         layout.addWidget(list_widget)
 
-        info_label = QtWidgets.QLabel("Tip: Select multiple columns with Shift/Ctrl, then press Space to check/uncheck all selected.")
+        info_label = QtWidgets.QLabel(
+            "Tip: Select multiple columns with Shift/Ctrl, then press Space to check/uncheck all selected."
+        )
         layout.insertWidget(1, info_label)
 
         def populate_list():
@@ -953,8 +818,8 @@ class WorkAllocationPortalViewerDialog(QDialog):
                         | Qt.ItemIsDragEnabled
                         | Qt.ItemIsSelectable
                     )
-                    # Check if column is visible
-                    if not self.ui.tableWidget.isColumnHidden(i):
+                    # Column visibility
+                    if not self.ui.tableView.isColumnHidden(i):
                         item.setCheckState(Qt.Checked)
                     else:
                         item.setCheckState(Qt.Unchecked)
@@ -963,13 +828,27 @@ class WorkAllocationPortalViewerDialog(QDialog):
         populate_list()
         search.textChanged.connect(populate_list)
 
-        select_all_btn.clicked.connect(lambda: [list_widget.item(i).setCheckState(Qt.Checked) for i in range(list_widget.count())])
-        clear_btn.clicked.connect(lambda: [list_widget.item(i).setCheckState(Qt.Unchecked) for i in range(list_widget.count())])
+        select_all_btn.clicked.connect(
+            lambda: [list_widget.item(i).setCheckState(Qt.Checked) for i in range(list_widget.count())]
+        )
+        clear_btn.clicked.connect(
+            lambda: [list_widget.item(i).setCheckState(Qt.Unchecked) for i in range(list_widget.count())]
+        )
 
         btn_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         layout.addWidget(btn_box)
         btn_box.accepted.connect(dialog.accept)
         btn_box.rejected.connect(dialog.reject)
+
+        def on_item_changed(item):
+            if not list_widget.hasFocus():
+                return
+            state = item.checkState()
+            for selected_item in list_widget.selectedItems():
+                if selected_item is not item:
+                    selected_item.setCheckState(state)
+
+        list_widget.itemChanged.connect(on_item_changed)
 
         if dialog.exec_() != QtWidgets.QDialog.Accepted:
             return
@@ -983,53 +862,41 @@ class WorkAllocationPortalViewerDialog(QDialog):
             new_order.append(col_name)
             visibility[col_name] = item.checkState() == Qt.Checked
 
-        # Set visibility for all columns
-        for i, col in enumerate(all_cols):
-            self.ui.tableWidget.setColumnHidden(i, not visibility.get(col, False))
+        # Set visibility
+        for i, col_name in enumerate(all_cols):
+            is_visible = visibility.get(col_name, False)
+            col_idx = self.columns.index(col_name)
+            self.ui.tableView.setColumnHidden(col_idx, not is_visible)
 
         # Reorder columns
-        header = self.ui.tableWidget.horizontalHeader()
+        header = self.ui.tableView.horizontalHeader()
         for target_idx, col_name in enumerate(new_order):
-            current_idx = header.visualIndex(all_cols.index(col_name))
-            header.moveSection(current_idx, target_idx)
-
-        def on_item_changed(item):
-            if not list_widget.hasFocus():
-                return  # avoid recursion when programmatically changing check state
-            state = item.checkState()
-            for selected_item in list_widget.selectedItems():
-                if selected_item is not item:
-                    selected_item.setCheckState(state)
-
-        list_widget.itemChanged.connect(on_item_changed)
+            original_idx = self.columns.index(col_name)
+            current_visual_idx = header.visualIndex(original_idx)
+            if current_visual_idx != target_idx:
+                header.moveSection(current_visual_idx, target_idx)
 
     def zoom_to_selected_row_on_map(self):
         """Zoom QGIS map canvas to the geometry of the selected row in the table."""
-        # Get the selected row
-        selected_items = self.ui.tableWidget.selectedItems()
-        if not selected_items:
+        selected_indexes = self.ui.tableView.selectedIndexes()
+        if not selected_indexes:
             QMessageBox.information(self, "Zoom", "Please select a row to zoom to.")
             return
 
-        # Find the s_no of the selected row (assuming s_no is unique)
         s_no_idx = self.columns.index("s_no")
-        row = selected_items[0].row()
-        s_no_item = self.ui.tableWidget.item(row, s_no_idx)
-        if not s_no_item:
+        selected_row = selected_indexes[0].row()
+        s_no = self.model.index(selected_row, s_no_idx).data()
+        if not s_no:
             QMessageBox.warning(self, "Zoom", "Could not determine the selected row's s_no.")
             return
-        s_no = s_no_item.text()
-        print(f"[DEBUG] Zoom requested for s_no: {s_no}")
 
-        # Use the stored QGIS layer reference
+        print(f"[DEBUG] Zoom requested for s_no: {s_no}")
         layer = self.qgis_layer
         if not layer:
             QMessageBox.warning(self, "Zoom", "Editable layer not found in QGIS.")
             return
-
         print(f"[DEBUG] Using layer: {layer.name()}")
 
-        # Find the feature by s_no
         expr = f'"s_no" = {s_no}'
         features = layer.getFeatures(expr)
         feature = next(features, None)
@@ -1039,18 +906,17 @@ class WorkAllocationPortalViewerDialog(QDialog):
         if not feature.hasGeometry():
             QMessageBox.warning(self, "Zoom", "Feature geometry not found for the selected row.")
             return
-        
+
         geom = feature.geometry()
         bbox = geom.boundingBox()
-        # Transform bbox to map CRS if needed
         layer_crs = layer.crs()
         map_crs = QgsProject.instance().crs()
         if layer_crs != map_crs:
             transform = QgsCoordinateTransform(layer_crs, map_crs, QgsProject.instance())
             bbox = transform.transformBoundingBox(bbox)
-        # If geometry is a point, expand the bbox a bit
-        if geom.type() == 0:  # 0 = Point
-            buffer = 0.0005  # Adjust as needed for your CRS
+
+        if geom.type() == 0:  # Point
+            buffer = 0.0005
             bbox = QgsRectangle(
                 bbox.xMinimum() - buffer, bbox.yMinimum() - buffer,
                 bbox.xMaximum() + buffer, bbox.yMaximum() + buffer
@@ -1058,49 +924,44 @@ class WorkAllocationPortalViewerDialog(QDialog):
 
         iface.mapCanvas().setExtent(bbox)
         iface.mapCanvas().refresh()
-
-        # Select the feature in the layer
         layer.removeSelection()
         layer.selectByIds([feature.id()])
-
-        print(f"[DEBUG] Feature found, geometry: {feature.geometry().asWkt()[:100]}...")
-
         iface.mapCanvas().setExtent(feature.geometry().boundingBox())
         iface.mapCanvas().refresh()
 
     def restore_selection_by_id(self, selected_cells):
         """Restore selection given a list of (s_no, col_name)."""
-        self.ui.tableWidget.clearSelection()
+        self.ui.tableView.clearSelection()
         s_no_idx = self.columns.index("s_no")
-        for row in range(self.ui.tableWidget.rowCount()):
-            s_no_item = self.ui.tableWidget.item(row, s_no_idx)
-            if not s_no_item:
-                continue
-            s_no = s_no_item.text()
-            for (sel_s_no, sel_col_name) in selected_cells:
+        selection_model = self.ui.tableView.selectionModel()
+        already_selected = set()
+        for row in range(self.model.rowCount()):
+            s_no = self.model.index(row, s_no_idx).data()
+            for sel_s_no, sel_col_name in selected_cells:
                 if s_no == sel_s_no and sel_col_name in self.columns:
                     col = self.columns.index(sel_col_name)
-                    item = self.ui.tableWidget.item(row, col)
-                    if item:
-                        item.setSelected(True)
+                    index = self.model.index(row, col)
+                    if (row, col) not in already_selected:
+                        selection_model.select(index, QItemSelectionModel.Select)
+                        already_selected.add((row, col))
 
     def filter_to_snos(self, s_no_list):
         """Show only rows with s_no in s_no_list. If list is empty, show nothing."""
-        if not hasattr(self, 'columns') or not hasattr(self.ui, 'tableWidget'):
+        if not hasattr(self, 'columns') or not hasattr(self.ui, 'tableView'):
             return
         if "s_no" not in self.columns:
             return
+
         s_no_set = set(map(str, s_no_list))
         s_no_idx = self.columns.index("s_no")
-        for row in range(self.ui.tableWidget.rowCount()):
-            s_no_item = self.ui.tableWidget.item(row, s_no_idx)
-            if not s_no_item or s_no_item.text() not in s_no_set:
-                self.ui.tableWidget.setRowHidden(row, True)
-            else:
-                self.ui.tableWidget.setRowHidden(row, False)
-        # If no selection, hide all rows
+
+        for row in range(self.model.rowCount()):
+            s_no = self.model.index(row, s_no_idx).data()
+            hide = (not s_no or s_no not in s_no_set)
+            self.ui.tableView.setRowHidden(row, hide)
+
         if not s_no_set:
-            for row in range(self.ui.tableWidget.rowCount()):
-                self.ui.tableWidget.setRowHidden(row, True)
+            for row in range(self.model.rowCount()):
+                self.ui.tableView.setRowHidden(row, True)
 
 

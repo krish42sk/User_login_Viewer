@@ -525,7 +525,7 @@ class UserLoginViewer:
     def show_select_state_dialog(self):
         try:
             subcountries = self.db_handler.fetch_unique_subcountries('"public"."tm_production_inputs"')
-            print("Fetched subcountries:", subcountries)
+            #print("Fetched subcountries:", subcountries)
         except Exception as e:
             print("Error fetching subcountries:", e)
             subcountries = []
