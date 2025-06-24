@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/plugins/user_login_viewer" >
+        <file>icon.png</file>
+    </qresource>
+</RCC>
