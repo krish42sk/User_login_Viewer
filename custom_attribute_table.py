@@ -56,15 +56,20 @@ class CustomAttributeTable(QFrame):
         self.frame.Create_filter.setIcon(QIcon(os.path.join(icon_dir, "filter.png")))
 
     def setup_shortcuts(self):
-        QShortcut(QKeySequence("Ctrl+S"), self, self.save_edits)
-        QShortcut(QKeySequence("Ctrl+R"), self, self.populate_table)
-        QShortcut(QKeySequence("Ctrl+O"), self, self.organize_columns)
-        QShortcut(QKeySequence("Ctrl+F"), self, self.create_filter)
-        QShortcut(QKeySequence("Ctrl+C"), self, self.clipboard_manager.copy_selection)
-        QShortcut(QKeySequence("Ctrl+V"), self, self.clipboard_manager.paste_selection)
-        QShortcut(QKeySequence("Ctrl+Z"), self, self.clipboard_manager.undo)
-        QShortcut(QKeySequence("Ctrl+Y"), self, self.clipboard_manager.redo)
-
+        shortcuts = [
+            (QKeySequence("Ctrl+S"), self.save_edits),
+            (QKeySequence("Ctrl+R"), self.populate_table),
+            (QKeySequence("Ctrl+O"), self.organize_columns),
+            (QKeySequence("Ctrl+F"), self.create_filter),
+            (QKeySequence("Ctrl+C"), self.clipboard_manager.copy_selection),
+            (QKeySequence("Ctrl+V"), self.clipboard_manager.paste_selection),
+            (QKeySequence("Ctrl+Z"), self.clipboard_manager.undo),
+            (QKeySequence("Ctrl+Y"), self.clipboard_manager.redo),
+        ]
+        for seq, slot in shortcuts:
+            sc = QShortcut(seq, self)
+            sc.setContext(Qt.ApplicationShortcut)
+            sc.activated.connect(slot)
     def connect_signals(self):
         self.frame.Save.clicked.connect(self.save_edits)
         self.frame.Refresh.clicked.connect(self.populate_table)
@@ -139,11 +144,16 @@ class CustomAttributeTable(QFrame):
         self.tableWidget.setHorizontalHeaderLabels(columns)
 
         self.tableWidget.setSortingEnabled(False)
+        int_columns = {"s_no", "work_unit_id"}  # Add all integer column names here
+
         for row_idx, row in enumerate(rows):
             for col_idx, value in enumerate(row):
-                item = QTableWidgetItem(str(value))
-                item.setData(Qt.UserRole, str(value))
                 col_name = columns[col_idx]
+                if col_name in int_columns:
+                    item = IntSortTableWidgetItem(str(value))
+                else:
+                    item = QTableWidgetItem(str(value))
+                item.setData(Qt.UserRole, str(value))
                 if col_name in self.editable_fields:
                     item.setBackground(Qt.white)
                 else:
@@ -284,6 +294,7 @@ class CustomAttributeTable(QFrame):
 
         ui_path = os.path.join(os.path.dirname(__file__), "custom_attribute_table_filter.ui")
         dialog = QtWidgets.QDialog(self)
+        dialog.setModal(True)  # Make the dialog modal
         uic.loadUi(ui_path, dialog)
         dialog.setWindowTitle(f"Filter: {col_name}")
 
@@ -374,6 +385,12 @@ class CustomAttributeTable(QFrame):
         search = QtWidgets.QLineEdit()
         search.setPlaceholderText("Search columns...")
         layout.addWidget(search)
+        btn_row = QtWidgets.QHBoxLayout()
+        select_all_btn = QtWidgets.QPushButton("Select All")
+        clear_btn = QtWidgets.QPushButton("Clear")
+        btn_row.addWidget(select_all_btn)
+        btn_row.addWidget(clear_btn)
+        layout.addLayout(btn_row)        
         
         list_widget = QtWidgets.QListWidget()
         list_widget.setDragDropMode(QtWidgets.QAbstractItemView.InternalMove)
@@ -392,6 +409,9 @@ class CustomAttributeTable(QFrame):
 
         populate_list()
         search.textChanged.connect(populate_list)
+
+        select_all_btn.clicked.connect(lambda: [list_widget.item(i).setCheckState(Qt.Checked) for i in range(list_widget.count())])
+        clear_btn.clicked.connect(lambda: [list_widget.item(i).setCheckState(Qt.Unchecked) for i in range(list_widget.count())])
 
         btn_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         layout.addWidget(btn_box)
@@ -443,9 +463,9 @@ class CustomAttributeTable(QFrame):
         """Handle keyboard shortcuts for copy and paste."""
         try:
             if event.matches(QKeySequence.Copy):
-                self.copy_selection()
+                self.clipboard_manager.copy_selection()
             elif event.matches(QKeySequence.Paste):
-                self.paste_selection()
+                self.clipboard_manager.paste_selection()
             else:
                 super().keyPressEvent(event)
         except Exception as e:
@@ -501,28 +521,43 @@ class CustomAttributeTable(QFrame):
             selected = self.tableWidget.selectedIndexes()
             if not selected:
                 return
-            selected = sorted(selected, key=lambda x: (x.row(), x.column()))
+            rows = sorted(set(idx.row() for idx in selected))
+            cols = sorted(set(idx.column() for idx in selected))
             text = ""
-            rows = {}
-            for idx in selected:
-                rows.setdefault(idx.row(), {})[idx.column()] = self.tableWidget.item(idx.row(), idx.column()).text()
-            for r in sorted(rows):
-                line = "\t".join(rows[r].get(c, "") for c in sorted(rows[r]))
-                text += line + "\n"
+            for r in rows:
+                line = []
+                for c in cols:
+                    item = self.tableWidget.item(r, c)
+                    line.append(item.text() if item else "")
+                text += "\t".join(line) + "\n"
             QApplication.clipboard().setText(text.strip())
 
         def paste_selection(self):
             text = QApplication.clipboard().text()
             if not text:
                 return
-            start = self.tableWidget.selectedIndexes()
-            if not start:
+            start_indexes = self.tableWidget.selectedIndexes()
+            if not start_indexes:
                 return
-            start_row, start_col = start[0].row(), start[0].column()
-            rows = text.strip().split('\n')
-            for r, line in enumerate(rows):
-                cells = line.split('\t')
-                for c, val in enumerate(cells):
+            start_row, start_col = start_indexes[0].row(), start_indexes[0].column()
+            rows = [line.split('\t') for line in text.strip().split('\n')]
+
+            # If only one cell copied, fill all selected cells
+            if len(rows) == 1 and len(rows[0]) == 1 and len(start_indexes) > 1:
+                value = rows[0][0]
+                for idx in start_indexes:
+                    col_name = self.tableWidget.horizontalHeaderItem(idx.column()).text().replace(" 🔽", "")
+                    if col_name in self.editable_fields:
+                        item = self.tableWidget.item(idx.row(), idx.column())
+                        old_value = item.text() if item else ""
+                        self.tableWidget.setItem(idx.row(), idx.column(), QTableWidgetItem(value))
+                        self.undo_stack.append((idx.row(), idx.column(), old_value, value))
+                        self.redo_stack.clear()
+                return
+
+            # Otherwise, paste as block
+            for r, row_vals in enumerate(rows):
+                for c, val in enumerate(row_vals):
                     row_idx, col_idx = start_row + r, start_col + c
                     if row_idx < self.tableWidget.rowCount() and col_idx < self.tableWidget.columnCount():
                         col_name = self.tableWidget.horizontalHeaderItem(col_idx).text().replace(" 🔽", "")
@@ -552,4 +587,11 @@ class CustomAttributeTable(QFrame):
             if item:
                 item.setText(old_val)
                 self.undo_stack.append((row, col, new_val, old_val))
+
+class IntSortTableWidgetItem(QTableWidgetItem):
+    def __lt__(self, other):
+        try:
+            return int(self.text()) < int(other.text())
+        except ValueError:
+            return self.text() < other.text()
 
