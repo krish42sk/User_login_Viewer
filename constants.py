@@ -7,7 +7,7 @@ Defines which fields are editable for each user role in the application.
 EDITABLE_FIELDS = {
     # RFDB Production Leaders
     'rfdb_production_leaders': [
-        'rfdb_alloted_date',
+        'rfdb_allotted_date',
         'rfdb_completed_date',
         'rfdb_production_done_by',
         'rfdb_production_emp_id',
@@ -18,7 +18,7 @@ EDITABLE_FIELDS = {
 
     # SILOC Production Leaders
     'siloc_production_leaders': [
-        'siloc_production_alloted_date',
+        'siloc_production_allotted_date',
         'siloc_production_autodetection_status',
         'siloc_production_completed_date',
         'siloc_production_done_by',
@@ -31,7 +31,7 @@ EDITABLE_FIELDS = {
 
     # SILOC QC Leaders
     'siloc_qc_leaders': [
-        'siloc_qc_alloted_date',
+        'siloc_qc_allotted_date',
         'siloc_qc_completed_date',
         'siloc_qc_done_by',
         'siloc_qc_emp_id',
@@ -45,7 +45,7 @@ EDITABLE_FIELDS = {
     'rfdb_qc_leaders': [
         'delivery_status',
         'delivered_date',
-        'rfdb_attri_qc_alloted_date',
+        'rfdb_attri_qc_allotted_date',
         'rfdb_attri_qc_completed_date',
         'rfdb_attri_qc_done_by',
         'rfdb_attri_qc_emp_id',
@@ -66,21 +66,21 @@ EDITABLE_FIELDS = {
         'rfdb_path_association_qc_remarks',
         'rfdb_path_association_qc_status',
         'rfdb_path_association_qc_time_taken',
-        'rfdb_qc_alloted_date',
+        'rfdb_qc_allotted_date',
         'rfdb_qc_completed_date',
         'rfdb_qc_done_by',
         'rfdb_qc_emp_id',
         'rfdb_qc_remarks',
         'rfdb_qc_status',
         'rfdb_qc_time_taken',
-        'rfdb_qa_alloted_date',
+        'rfdb_qa_allotted_date',
         'rfdb_qa_completed_date',
         'rfdb_qa_done_by',
         'rfdb_qa_emp_id',
         'rfdb_qa_remarks',
         'rfdb_qa_status',
         'rfdb_qa_time_taken',
-        'rfdb_roadtype_qc_alloted_date',
+        'rfdb_roadtype_qc_allotted_date',
         'rfdb_roadtype_qc_completed_date',
         'rfdb_roadtype_qc_done_by',
         'rfdb_roadtype_qc_emp_id',

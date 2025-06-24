@@ -3,15 +3,18 @@ from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from .resources import *
 from .login_dialog import LoginDialog, EDITABLE_FIELDS
+from .custom_attribute_table import CustomAttributeTable
 import os.path
-from qgis.core import QgsEditorWidgetSetup
-
+from qgis.core import QgsEditorWidgetSetup, QgsMapLayer
 import threading
-from .conflict_listener import listen_for_edits
+from .conflict_listener import listen_for_edits, is_field_editable, show_conflict_warning, show_privilege_error
 
-from PyQt5.QtCore import QTimer, QObject
-from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtCore import QTimer, QObject, Qt
+from PyQt5.QtWidgets import QMessageBox, QFrame
 from datetime import datetime
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class UserLoginViewer:
     def __init__(self, iface):
@@ -35,7 +38,7 @@ class UserLoginViewer:
 
         # Initialize login dialog
         self.login_dialog = LoginDialog()
-        self.login_dialog.login_successful.connect(self.on_login_success)
+        self.login_dialog.login_successful.connect(self.on_login_successful)
         self.login_dialog.logout_requested.connect(self.on_logout)
         self.is_logged_in = False
 
@@ -75,11 +78,33 @@ class UserLoginViewer:
 
     def initGui(self):
         icon_path = os.path.join(self.plugin_dir, 'icon.png')
-        self.add_action(
+        portal_icon_path = os.path.join(self.plugin_dir, 'table.png')
+        csv_icon_path = os.path.join(self.plugin_dir, 'csv_icon.png')
+
+        # Always enabled
+        self.work_allocation_panel_action = self.add_action(
             icon_path,
-            text=self.tr(u'Open Work Allocation Panel'),
+            text=self.tr(u'Open Work Allocation Login Panel'),
             callback=self.run,
-            parent=self.iface.mainWindow())
+            parent=self.iface.mainWindow(),
+            enabled_flag=True
+        )
+        # Grayed out by default, use portal_icon.png
+        self.work_allocation_viewer_action = self.add_action(
+            portal_icon_path,
+            text=self.tr(u'custom_attribute_table'),
+            callback=self.show_custom_attribute_table,
+            parent=self.iface.mainWindow(),
+            enabled_flag=False  # This should be set to True after login!
+        )
+        # Grayed out by default, use csv_icon.png
+        self.upload_csv_action = self.add_action(
+            csv_icon_path,
+            text=self.tr(u'Upload CSV'),
+            callback=self.login_dialog.upload_csv_dialog,  # Use the method from LoginDialog
+            parent=self.iface.mainWindow(),
+            enabled_flag=False
+        )
 
     def unload(self):
         for action in self.actions:
@@ -98,23 +123,44 @@ class UserLoginViewer:
                 self.login_dialog.show()
                 QTimer.singleShot(0, self.sort_attribute_table_by_sno)
         except Exception as e:
+            logger.exception("Failed to open login dialog")
             QMessageBox.critical(None, "Error", f"Failed to open login dialog:\n{e}")
 
-    def on_login_success(self):
-        try:
-            self.is_logged_in = True
-            self.set_editable_fields_for_role(getattr(self.login_dialog, 'designation', 'user'))
-            self.setup_conflict_listener()
-            self.sort_attribute_table_by_sno()
-        except Exception as e:
-            QMessageBox.critical(None, "Login Error", f"An error occurred after login:\n{e}")
+    def on_login_successful(self, db_handler):
+        self.is_logged_in = True
+        self.db_handler = db_handler
+        self.set_editable_fields_for_role(getattr(self.login_dialog, 'designation', 'user'))
+        self.setup_conflict_listener()
+        self.sort_attribute_table_by_sno()
+
+        designation = getattr(self.login_dialog, 'designation', '').lower()
+        if designation.endswith('leaders'):
+            self.work_allocation_viewer_action.setEnabled(True)
+            if designation == 'grand_leaders':
+                self.upload_csv_action.setEnabled(True)
+            else:
+                self.upload_csv_action.setEnabled(False)
+        else:
+            self.work_allocation_viewer_action.setEnabled(False)
+            self.upload_csv_action.setEnabled(False)
 
     def on_logout(self):
         self.is_logged_in = False
+        self.work_allocation_viewer_action.setEnabled(False)
+        self.upload_csv_action.setEnabled(False)
+        # Refresh QGIS to update UI and layers after logout
+        try:
+            self.iface.mapCanvas().refresh()
+            layer = self.iface.activeLayer()
+            if layer:
+                layer.triggerRepaint()
+        except Exception as e:
+            logger.error(f"Error refreshing QGIS after logout: {e}")
 
     def set_editable_fields_for_role(self, role):
         layer = self.iface.activeLayer()
         if not layer:
+            QMessageBox.warning(None, "No Layer", "No active layer found.")
             return
 
         editable_fields = EDITABLE_FIELDS.get(role, [])
@@ -124,7 +170,7 @@ class UserLoginViewer:
             try:
                 layer.setEditorWidgetSetup(idx, QgsEditorWidgetSetup('TextEdit', {}))
             except Exception as e:
-                print(f"Error setting editor widget for field {field.name()}: {e}")
+                logger.error(f"Error setting editor widget for field {field.name()}: {e}")
 
         def on_attr_changed(fid, idx, value):
             if getattr(self, '_reverting_attr', False):
@@ -173,7 +219,7 @@ class UserLoginViewer:
 
                 QTimer.singleShot(0, self.sort_attribute_table_by_sno)
             except Exception as e:
-                print(f"Error in attribute change handler: {e}")
+                logger.exception(f"Error in attribute change handler: {e}")
 
         try:
             layer.attributeValueChanged.disconnect()
@@ -187,7 +233,7 @@ class UserLoginViewer:
     def sort_attribute_table_by_sno(self):
         """Sort the attribute table by s_no column for the active layer."""
         layer = self.iface.activeLayer()
-        if not layer or layer.type() != layer.VectorLayer:
+        if not layer or layer.type() != QgsMapLayer.VectorLayer:
             return
         try:
             config = layer.attributeTableConfig()
@@ -196,53 +242,43 @@ class UserLoginViewer:
                 config.setSortOrder(0)  # 0 = AscendingOrder, 1 = DescendingOrder
                 layer.setAttributeTableConfig(config)
             else:
-                print("Field 's_no' not found for sorting.")
+                logger.error("Field 's_no' not found for sorting.")
         except Exception as e:
             print(f"Error sorting attribute table: {e}")
 
     def setup_conflict_listener(self):
-        """Attach a conflict listener to the active layer."""
-        layer = self.iface.activeLayer()
-        if not layer:
+        """Start the background conflict listener after login."""
+        # Example: get DB config from self.login_dialog or settings
+        db_config = self.login_dialog.db_config
+        db_user = self.login_dialog.db_user
+        db_password = self.login_dialog.db_password
+        role = getattr(self.login_dialog, 'designation', 'user')
+        listen_for_edits(role, db_config, db_user, db_password)
+
+    def show_work_allocation_panel(self):
+        """Show the login dialog as the work allocation panel."""
+        self.login_dialog.setModal(True)
+        self.login_dialog.show()
+
+    def show_custom_attribute_table(self):
+        designation = getattr(self.login_dialog, "designation", "").lower()
+        if not self.is_logged_in or not designation:
+            QMessageBox.warning(None, "No Role", "User role not set. Please login again.")
             return
-
-        class ConflictListener(QObject):
-            def __init__(self, layer, plugin_instance, parent=None):
-                super().__init__(parent)
-                self.layer = layer
-                self.plugin_instance = plugin_instance
-                self._buffer_connected = False
-                try:
-                    self.layer.editingStarted.connect(self.on_editing_started)
-                    self.layer.editingStopped.connect(self.on_editing_stopped)
-                    self.layer.committedFeaturesAdded.connect(self.on_committed)
-                    self.layer.committedFeaturesRemoved.connect(self.on_committed)
-                    self.layer.committedAttributeValuesChanges.connect(self.on_committed)
-                except Exception as e:
-                    print(f"Error connecting conflict listener signals: {e}")
-
-            def on_editing_started(self):
-                try:
-                    edit_buffer = self.layer.editBuffer()
-                    if edit_buffer and not self._buffer_connected:
-                        self._buffer_connected = True
-                except Exception as e:
-                    print(f"Error in on_editing_started: {e}")
-
-            def on_editing_stopped(self):
-                try:
-                    edit_buffer = self.layer.editBuffer()
-                    if edit_buffer and self._buffer_connected:
-                        self._buffer_connected = False
-                    print("Editing stopped.")
-                except Exception as e:
-                    print(f"Error in on_editing_stopped: {e}")
-
-            def on_committed(self, *args):
-                print("Edits committed.")
-                QTimer.singleShot(0, self.plugin_instance.sort_attribute_table_by_sno)
-
-            def on_conflict(self, conflicts):
-                QMessageBox.warning(None, "Edit Conflict", "A conflict occurred while saving edits. Please refresh and try again.")
-
-        self._conflict_listener = ConflictListener(layer, self, parent=None)
+        if not hasattr(self, "db_handler") or self.db_handler is None:
+            QMessageBox.critical(None, "DB Error", "Database handler is not set!")
+            return
+        # Only allow leaders to access the table
+        if not designation.endswith("leaders"):
+            QMessageBox.warning(None, "Access Denied", "You do not have permission to access the attribute table.")
+            return
+        editable_fields = EDITABLE_FIELDS.get(designation, [])
+        self.table_frame = CustomAttributeTable(
+            db_handler=self.db_handler,
+            editable_fields=editable_fields,
+            df=getattr(self.login_dialog, "df", None),
+            designation=designation,
+            parent=self.iface.mainWindow()
+        )
+        self.table_frame.show()
+        print("Rows in table:", self.table_frame.tableWidget.rowCount())

@@ -2,7 +2,7 @@ import psycopg2
 import logging
 from contextlib import contextmanager
 
-logger = logging.getLogger("DbHandler")
+logger = logging.getLogger(__name__)
 
 class NotConnectedException(Exception):
     pass
@@ -14,39 +14,43 @@ class DisconnectedCursor:
         raise psycopg2.OperationalError('Server is currently disconnected.')
 
 class DbHandler:
-    def __init__(self, db_config, user, password):
-        self.db_config = db_config
-        self.user = user
+    """Only DB connection/session/transaction logic here."""
+    def __init__(self, config, username, password):
+        self.config = config
+        self.username = username
         self.password = password
         self.conn = None
         self.is_cleaned_up = False
 
     def connect(self):
+        """Establish and return a psycopg2 connection."""
         if self.is_cleaned_up:
             raise NotConnectedException("Connection cleaned up.")
         if self.conn and not self.conn.closed:
             return self.conn
         try:
             self.conn = psycopg2.connect(
-                dbname=self.db_config["dbname"],
-                user=self.user,
-                password=self.password,
-                host=self.db_config["host"],
-                port=self.db_config["port"]
+                dbname=self.config['dbname'],
+                host=self.config['host'],
+                port=self.config['port'],
+                user=self.username,
+                password=self.password
             )
-            logger.info("Connected to DB: %s", self.db_config["dbname"])
+            logger.info("Connected to DB: %s", self.config["dbname"])
         except psycopg2.Error as e:
             logger.error("DB connection failed: %s", e)
             raise
         return self.conn
 
     def close(self):
+        """Close the DB connection."""
         if self.conn:
             self.conn.close()
             self.conn = None
             logger.info("DB connection closed.")
 
     def cleanup(self):
+        """Cleanup handler and close connection."""
         self.is_cleaned_up = True
         self.close()
 
@@ -60,17 +64,17 @@ class DbHandler:
             if exclude_pid:
                 cur.execute(
                     "SELECT pid FROM pg_stat_activity WHERE usename = %s AND pid != %s",
-                    (self.user, exclude_pid)
+                    (self.username, exclude_pid)
                 )
             else:
                 cur.execute(
                     "SELECT pid FROM pg_stat_activity WHERE usename = %s",
-                    (self.user,)
+                    (self.username,)
                 )
             return [row[0] for row in cur.fetchall()]
 
     def terminate_sessions(self, pids):
-        if self.user.lower() != "postgres":
+        if self.username.lower() != "postgres":
             raise PermissionError("Only superuser can terminate sessions.")
         with self.get_cursor_with_retries() as cur:
             for pid in pids:
@@ -80,6 +84,7 @@ class DbHandler:
 
     @contextmanager
     def get_cursor_with_retries(self, retries=2, autocommit=True):
+        """Get a DB cursor with retry logic."""
         for attempt in range(retries):
             try:
                 conn = self.connect()
@@ -96,9 +101,16 @@ class DbHandler:
                     yield DisconnectedCursor()
                 else:
                     continue
+            except Exception as e:
+                logger.error("Unexpected error in cursor operation: %s", e)
+                raise
+            finally:
+                if 'cur' in locals() and not cur.closed:
+                    cur.close()
 
     @contextmanager
     def transaction(self):
+        """Context manager for a DB transaction."""
         conn = self.connect()
         try:
             yield conn
@@ -106,12 +118,12 @@ class DbHandler:
             logger.info("Transaction committed.")
         except Exception as e:
             conn.rollback()
-            logger.error("Transaction rolled back due to: %s", e)
+            logger.exception("Transaction rolled back due to: %s", e)
             raise
 
-    # Optional: context manager for read-only transaction
     @contextmanager
     def read_only_transaction(self):
+        """Context manager for a read-only transaction."""
         conn = self.connect()
         try:
             with conn.cursor() as cur:
@@ -121,5 +133,6 @@ class DbHandler:
             logger.info("Read-only transaction committed.")
         except Exception as e:
             conn.rollback()
-            logger.error("Read-only transaction rolled back: %s", e)
+            logger.exception("Read-only transaction rolled back: %s", e)
             raise
+

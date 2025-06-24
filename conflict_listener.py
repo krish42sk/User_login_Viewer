@@ -1,26 +1,34 @@
 from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtCore import QTimer
 import psycopg2
 import select
 import threading
+import logging
 
 # Import EDITABLE_FIELDS from your login dialog or config
 from .login_dialog import EDITABLE_FIELDS
 
+logger = logging.getLogger(__name__)
+
 # Function to show a GUI warning in QGIS
 def show_conflict_warning(user_editing, row_id, column):
-    msg = QMessageBox()
-    msg.setIcon(QMessageBox.Warning)
-    msg.setText(f"⚠️ Conflict: User {user_editing} is editing cell ({row_id}, {column}). Please wait.")
-    msg.setWindowTitle("Edit Conflict Warning")
-    msg.exec_()
+    def _show():
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Warning)
+        msg.setText(f"⚠️ Conflict: User {user_editing} is editing cell ({row_id}, {column}). Please wait.")
+        msg.setWindowTitle("Edit Conflict Warning")
+        msg.exec_()
+    QTimer.singleShot(0, _show)
 
 # Function to show a privilege error in QGIS
 def show_privilege_error(column):
-    msg = QMessageBox()
-    msg.setIcon(QMessageBox.Critical)
-    msg.setText(f"❌ You do not have privilege to edit the column '{column}'.")
-    msg.setWindowTitle("Permission Denied")
-    msg.exec_()
+    def _show():
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Critical)
+        msg.setText(f"❌ You do not have privilege to edit the column '{column}'.")
+        msg.setWindowTitle("Permission Denied")
+        msg.exec_()
+    QTimer.singleShot(0, _show)
 
 # Function to check if a field is editable by the user role
 def is_field_editable(role, field_name):
@@ -49,7 +57,7 @@ def listen_for_edits(current_user_role, db_config, db_user, db_password):
             conn.autocommit = True
             cursor = conn.cursor()
             cursor.execute("LISTEN edit_conflict;")
-            print("🔍 Listening for conflicts in QGIS...")
+            logger.info("Listening for conflicts in QGIS...")
 
             while True:
                 if select.select([conn], [], [], 5) == ([conn], [], []):
@@ -66,9 +74,9 @@ def listen_for_edits(current_user_role, db_config, db_user, db_password):
                                 print(f"❌ No privilege to edit column: {column}")
                                 show_privilege_error(column)
                         else:
-                            print("⚠️ Received malformed notification:", notify.payload)
+                            logger.warning("Received malformed notification: %s", notify.payload)
         except psycopg2.Error as e:
-            print(f"❌ Database error: {e}")
+            logger.error("Database error: %s", e)
         finally:
             if cursor:
                 cursor.close()
