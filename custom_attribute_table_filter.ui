@@ -22,24 +22,6 @@
     </widget>
    </item>
    <item>
-    <widget class="QScrollArea" name="scrollArea">
-     <property name="widgetResizable">
-      <bool>true</bool>
-     </property>
-     <widget class="QWidget" name="scrollAreaWidgetContents">
-      <property name="geometry">
-       <rect>
-        <x>0</x>
-        <y>0</y>
-        <width>329</width>
-        <height>303</height>
-       </rect>
-      </property>
-      <layout class="QVBoxLayout" name="checkBoxLayout"/>
-     </widget>
-    </widget>
-   </item>
-   <item>
     <layout class="QHBoxLayout" name="selectClearLayout">
      <item>
       <widget class="QPushButton" name="selectAllButton">

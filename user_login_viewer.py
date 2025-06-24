@@ -48,6 +48,8 @@ class UserLoginViewer:
         self.login_dialog.logout_requested.connect(self.on_logout)
         self.is_logged_in = False
 
+        self.selected_feature_dialog = None  # <-- Add this line
+
     def tr(self, message):
         return QCoreApplication.translate('UserLoginViewer', message)
 
@@ -86,6 +88,8 @@ class UserLoginViewer:
         icon_path = os.path.join(self.plugin_dir, 'icon.png')
         portal_icon_path = os.path.join(self.plugin_dir, 'portal_icon.png')
         csv_icon_path = os.path.join(self.plugin_dir, 'csv_icon.png')
+        feature_selection_icon = os.path.join(self.plugin_dir, 'icon', 'feature-selection.png')
+        select_state_icon = os.path.join(self.plugin_dir, 'icon', 'select-state.png')
 
         # Always enabled
         self.work_allocation_panel_action = self.add_action(
@@ -114,14 +118,27 @@ class UserLoginViewer:
 
         # Add "Select state" submenu action
         self.select_state_action = self.add_action(
-            '',  # No icon
+            select_state_icon,
             text=self.tr(u'Select state'),
             callback=self.show_select_state_dialog,
             parent=self.iface.mainWindow(),
             enabled_flag=True
         )
 
-        self.login_dialog.portal_viewer_enable.connect(self.work_allocation_viewer_action.setEnabled)  # <-- Add this line
+        self.login_dialog.portal_viewer_enable.connect(self.work_allocation_viewer_action.setEnabled)
+
+        #No submenu implementation
+        # self.open_selected_feature_dialog_action = QAction(QIcon(feature_selection_icon), "Show Selected Feature", self.iface.mainWindow())
+        # self.open_selected_feature_dialog_action.triggered.connect(self.show_selected_feature_dialog)
+        # self.iface.registerMainWindowAction(self.open_selected_feature_dialog_action, "Shift+F8")
+        # self.actions.append(self.open_selected_feature_dialog_action)
+
+        #For submenu implementation comment out the above block(No submenu implementation) and (Unregister the Shift+F8 shortcut action)
+        self.open_selected_feature_dialog_action = QAction(QIcon(feature_selection_icon), "Show Selected Feature", self.iface.mainWindow())
+        self.open_selected_feature_dialog_action.setShortcut("Shift+F8")
+        self.open_selected_feature_dialog_action.triggered.connect(self.show_selected_feature_dialog)
+        self.iface.addPluginToMenu(self.menu, self.open_selected_feature_dialog_action)
+        self.toolbar.addAction(self.open_selected_feature_dialog_action)
 
     def show_work_allocation_panel(self):
         self.login_dialog.setModal(True)
@@ -132,6 +149,9 @@ class UserLoginViewer:
             self.iface.removePluginMenu(self.tr(u'&UserLoginViewer'), action)
             self.iface.removeToolBarIcon(action)
         del self.toolbar
+
+        # Unregister the Shift+F8 shortcut action
+        #self.iface.unregisterMainWindowAction(self.open_selected_feature_dialog_action)
 
     def run(self):
         try:
@@ -244,7 +264,7 @@ class UserLoginViewer:
         gc.collect()
 
     def set_editable_fields_for_role(self, role):
-        layer = self.iface.activeLayer()
+        layer = getattr(self.login_dialog, 'current_layer', None)
         if not layer:
             return
 
@@ -319,9 +339,10 @@ class UserLoginViewer:
             print(f"Error connecting attributeValueChanged: {e}")
 
     def sort_attribute_table_by_sno(self):
-        """Sort the attribute table by s_no column for the active layer."""
-        layer = self.iface.activeLayer()
-        if not layer or layer.type() != layer.VectorLayer:
+        """Sort the attribute table by s_no column for the plugin's loaded vector layer."""
+        # Use the layer loaded by your plugin, not iface.activeLayer()
+        layer = getattr(self.login_dialog, 'current_layer', None)
+        if not layer or not layer.isValid() or layer.type() != layer.VectorLayer:
             return
         try:
             config = layer.attributeTableConfig()
@@ -400,7 +421,8 @@ class UserLoginViewer:
         table_name = getattr(self.login_dialog, 'selected_table', 'public.production_inputs')
         self.work_allocation_dialog = WorkAllocationPortalViewerDialog(
             self.db_handler, user_role, table_name, subcountry=self.selected_subcountry,
-            emp_id=getattr(self.login_dialog, "emp_id", None),  # <-- pass emp_id!
+            emp_id=getattr(self.login_dialog, "emp_id", None),  
+            qgis_layer=self.login_dialog.current_layer,  # <-- pass the QGIS layer!
             parent=self.iface.mainWindow()
         )
         self.work_allocation_dialog.show()
@@ -579,6 +601,76 @@ class UserLoginViewer:
             self.work_allocation_dialog = None
         # Optionally, reopen the portal viewer automatically:
         # self.show_work_allocation_portal_viewer()
+
+    def show_selected_feature_dialog(self):
+        print("[DEBUG] Selected feature dialog triggered")
+        # Prevent duplicate dialog
+        if self.selected_feature_dialog is not None:
+            self.selected_feature_dialog.raise_()
+            self.selected_feature_dialog.activateWindow()
+            return
+
+        layer = self.iface.activeLayer()
+        if not layer:
+            QMessageBox.information(self.iface.mainWindow(), "No Layer", "Please select a vector layer.")
+            return
+
+        # Always open the dialog, even if nothing is selected
+        self.selected_feature_dialog = WorkAllocationPortalViewerDialog(
+            self.db_handler,
+            getattr(self.login_dialog, 'designation', 'user'),
+            getattr(self.login_dialog, 'selected_table', ''),
+            subcountry=self.selected_subcountry,
+            emp_id=getattr(self.login_dialog, "emp_id", None),
+            qgis_layer=layer,
+            parent=self.iface.mainWindow()
+        )
+        self.selected_feature_dialog.setWindowTitle("Selected Feature(s) Data")
+        self.selected_feature_dialog.show()
+
+        # Filter to current selection (may be empty)
+        self.update_selected_feature_dialog()
+
+        # Connect to selection changed signal
+        layer.selectionChanged.connect(self.update_selected_feature_dialog)
+
+        # Handle dialog close
+        def on_close():
+            try:
+                layer.selectionChanged.disconnect(self.update_selected_feature_dialog)
+            except Exception:
+                pass
+            self.selected_feature_dialog = None
+
+        self.selected_feature_dialog.finished.connect(on_close)
+        self.selected_feature_dialog.rejected.connect(on_close)
+        self.selected_feature_dialog.destroyed.connect(on_close)
+
+    def update_selected_feature_dialog(self):
+        if not self.selected_feature_dialog:
+            return
+        layer = self.iface.activeLayer()
+        if not layer:
+            self.selected_feature_dialog.filter_to_snos([])
+            return
+        s_no_idx = layer.fields().indexFromName("s_no")
+        selected_snos = [f["s_no"] for f in layer.selectedFeatures() if s_no_idx != -1]
+        self.selected_feature_dialog.filter_to_snos(selected_snos)
+
+    # def filter_to_snos(self, s_no_list):
+    #     """Show only rows with s_no in s_no_list. If list is empty, show nothing."""
+    #     s_no_set = set(map(str, s_no_list))
+    #     s_no_idx = self.columns.index("s_no")
+    #     for row in range(self.ui.tableWidget.rowCount()):
+    #         s_no_item = self.ui.tableWidget.item(row, s_no_idx)
+    #         if not s_no_item or s_no_item.text() not in s_no_set:
+    #             self.ui.tableWidget.setRowHidden(row, True)
+    #         else:
+    #             self.ui.tableWidget.setRowHidden(row, False)
+    #     # If no selection, hide all rows
+    #     if not s_no_set:
+    #         for row in range(self.ui.tableWidget.rowCount()):
+    #             self.ui.tableWidget.setRowHidden(row, True)
 
 class SelectStateDialog(QDialog):
     def __init__(self, subcountry_list, parent=None):

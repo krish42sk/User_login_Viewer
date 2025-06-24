@@ -375,6 +375,7 @@ class LoginDialog(QDialog):
         uri = (
                 f"dbname='{config['dbname']}' host={config['host']} port={config['port']} "
                 f"user='{username}' password='{password}' key='work_unit_id' sslmode=disable "
+                f"options='-c app.current_user_emp_id={username}' "
                 f'table={quoted_tbl}(geom) sql='
             )
 
@@ -512,7 +513,7 @@ class LoginDialog(QDialog):
                         self.conn.close()
                         self.conn = None
                     self.reset_form()  # Clear form fields
-                    QMessageBox.information(self, "Layers Removed", "Logged out and disconnected from database.")
+                    QMessageBox.information(self, "Layers Removed", "Layer Removed, disconnected from database.")
                     self.logout_requested.emit()
                     self._is_logging_out = False
             else:
@@ -524,7 +525,7 @@ class LoginDialog(QDialog):
                 self.conn.close()
                 self.conn = None
             self.reset_form()
-            QMessageBox.information(self, "Layers Removed", "Logged out and disconnected from database.")
+            QMessageBox.information(self, "Layers Removed", "Layer Removed, disconnected from database.")
             self.logout_requested.emit()
             self._is_logging_out = False
 
@@ -542,17 +543,16 @@ class LoginDialog(QDialog):
             self.current_layer.triggerRepaint()
             self.sort_attribute_table_by_sno(self.current_layer)
 
-    def sort_attribute_table_by_sno(self, layer):
+    def sort_attribute_table_by_sno(self, layer=None):
+        # Use the provided layer, or fallback to self.current_layer
+        if layer is None:
+            layer = getattr(self, 'current_layer', None)
+        if not layer or not layer.isValid() or layer.type() != layer.VectorLayer:
+            return
         try:
             idx = layer.fields().indexFromName('s_no')
             if idx != -1:
-                # QGIS Python API does not support programmatically sorting the attribute table UI.
-                # The following is NOT supported and will raise an error in most QGIS versions:
-                # dlg = iface.attributeTableDialog(layer)
-                # if dlg:
-                #     view = dlg.tableView()
-                #     view.sortByColumn(idx, Qt.AscendingOrder)
-                # Instead, users must sort manually in the attribute table UI.
+                # Sorting logic if needed
                 pass
             else:
                 print("Field 's_no' not found for sorting.")

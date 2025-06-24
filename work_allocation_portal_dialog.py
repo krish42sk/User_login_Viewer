@@ -1,19 +1,28 @@
 from PyQt5.QtWidgets import (
     QDialog, QTableWidgetItem, QMessageBox, QStyledItemDelegate, QUndoStack, QUndoCommand
 )
+from PyQt5.QtWidgets import QStyledItemDelegate, QComboBox
 from PyQt5.QtGui import QIcon, QColor
 from PyQt5.QtCore import Qt, QEvent
 import os
 from PyQt5 import QtWidgets
 from PyQt5 import uic
 from .work_allocation_portal_viewer import Ui_Dialog
-from .constants import EDITABLE_FIELDS, EMP_ID_TO_NAME_FIELDS
 from .conflict_listener import PostgresListener, is_field_editable
 import inspect
 from PyQt5.QtWidgets import QApplication, QTableWidgetItem
 from .db_handler import signal_bus
-
-
+from qgis.core import QgsProject
+from qgis.utils import iface
+from qgis.core import QgsProject, QgsRectangle, QgsCoordinateTransform
+#from .constants import EMP_ID_TO_NAME_FIELDS
+from .constants import (
+    EDITABLE_FIELDS,
+    INTERSECTION_TYPE_VALUES, TURN_MANEUVER_EXTRACTION_TYPE_VALUES,
+    RFDB_PRODUCTION_STATUS_VALUES, RFDB_QC_STATUS_VALUES,
+    SILOC_STATUS_VALUES, DELIVERY_STATUS_VALUES, DATE_COLUMNS
+)
+from .form_features import UndoRedoDelegate, ComboBoxDelegate, DateDelegate
 
 
 class NumericTableWidgetItem(QTableWidgetItem):
@@ -38,34 +47,47 @@ class DateTableWidgetItem(QTableWidgetItem):
             return str(self.value) < str(other.value)
 
 class CellEditCommand(QUndoCommand):
-    def __init__(self, dialog, row, col, old_value, new_value):
+    def __init__(self, dialog, s_no, col_name, old_value, new_value):
         super().__init__("Edit Cell")
         self.dialog = dialog
-        self.row = row
-        self.col = col 
+        self.s_no = s_no
+        self.col_name = col_name
         self.old_value = old_value
         self.new_value = new_value
 
+    def _find_row_col(self):
+        s_no_idx = self.dialog.columns.index("s_no")
+        col_idx = self.dialog.columns.index(self.col_name)
+        for row in range(self.dialog.ui.tableWidget.rowCount()):
+            s_no_item = self.dialog.ui.tableWidget.item(row, s_no_idx)
+            if s_no_item and s_no_item.text() == self.s_no:
+                return row, col_idx
+        return None, None
+
     def undo(self):
-        print(f"[UNDO] Cell ({self.row}, {self.col}) reverting to '{self.old_value}'")
+        print(f"[UNDO] Cell ({self.s_no}, {self.col_name}) reverting to '{self.old_value}'")
         self.dialog._is_undo_redo = True
-        item = self.dialog.ui.tableWidget.item(self.row, self.col)
-        if item:
-            self.dialog.ui.tableWidget.blockSignals(True)
-            item.setText("" if self.old_value is None else str(self.old_value))
-            self.dialog.ui.tableWidget.blockSignals(False)
-            self.dialog.handle_cell_changed(self.row, self.col)
+        row, col = self._find_row_col()
+        if row is not None and col is not None:
+            item = self.dialog.ui.tableWidget.item(row, col)
+            if item:
+                self.dialog.ui.tableWidget.blockSignals(True)
+                item.setText("" if self.old_value is None else str(self.old_value))
+                self.dialog.ui.tableWidget.blockSignals(False)
+                self.dialog.handle_cell_changed(row, col)
         self.dialog._is_undo_redo = False
 
     def redo(self):
-        #print(f"[REDO] Cell ({self.row}, {self.col}) setting to '{self.new_value}'")
+        #print(f"[REDO] Cell ({self.s_no}, {self.col_name}) setting to '{self.new_value}'")
         self.dialog._is_undo_redo = True
-        item = self.dialog.ui.tableWidget.item(self.row, self.col)
-        if item:
-            self.dialog.ui.tableWidget.blockSignals(True)
-            item.setText("" if self.new_value is None else str(self.new_value))
-            self.dialog.ui.tableWidget.blockSignals(False)
-            self.dialog.handle_cell_changed(self.row, self.col)
+        row, col = self._find_row_col()
+        if row is not None and col is not None:
+            item = self.dialog.ui.tableWidget.item(row, col)
+            if item:
+                self.dialog.ui.tableWidget.blockSignals(True)
+                item.setText("" if self.new_value is None else str(self.new_value))
+                self.dialog.ui.tableWidget.blockSignals(False)
+                self.dialog.handle_cell_changed(row, col)
         self.dialog._is_undo_redo = False
 
 class GroupEditCommand(QUndoCommand):
@@ -179,7 +201,6 @@ class FilterManager:
 
         # Helper for robust sorting
         def try_num(val):
-            # Treat None, empty string, and "None" as the lowest value
             if val is None or str(val).strip() == "" or str(val).lower() == "none":
                 return (0, float('-inf'))
             try:
@@ -187,12 +208,13 @@ class FilterManager:
             except (ValueError, TypeError):
                 return (2, str(val))
 
-        # Store visible values for this column the first time a filter is applied
         if col_name not in self._filter_value_pool:
+            # --- Apply all filters except the one for this column ---
+            filtered_rows = self.tableWidget.parent().get_filtered_rows_except(col_name)
             raw_values = [
                 self.tableWidget.item(row, index).text()
-                for row in range(self.tableWidget.rowCount())
-                if not self.tableWidget.isRowHidden(row) and self.tableWidget.item(row, index)
+                for row in filtered_rows
+                if self.tableWidget.item(row, index)
             ]
             # Remove duplicates while preserving order
             seen = set()
@@ -206,7 +228,6 @@ class FilterManager:
         else:
             values = self._filter_value_pool[col_name]
 
-
         # Load custom filter dialog
         ui_path = os.path.join(os.path.dirname(__file__), "custom_attribute_table_filter.ui")
         dialog = QtWidgets.QDialog(self.tableWidget)
@@ -214,44 +235,48 @@ class FilterManager:
         uic.loadUi(ui_path, dialog)
         dialog.setWindowTitle(f"Filter: {col_name}")
 
-        scroll_area = dialog.findChild(QtWidgets.QScrollArea, "scrollArea")
-        contents = scroll_area.findChild(QtWidgets.QWidget, "scrollAreaWidgetContents") if scroll_area else None
-        layout = contents.findChild(QtWidgets.QVBoxLayout, "checkBoxLayout") if contents else None
-        if layout is None:
-            return
+        # Remove the old listWidget from the layout if it exists
+        layout = dialog.findChild(QtWidgets.QVBoxLayout, "verticalLayout")
+        old_widget = dialog.findChild(QtWidgets.QListWidget, "listWidget")
+        if old_widget and layout:
+            layout.removeWidget(old_widget)
+            old_widget.deleteLater()
 
-        # Clear previous checkboxes
-        while layout.count():
-            child = layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+        # Add your custom CheckableListWidget
+        list_widget = self.tableWidget.parent().CheckableListWidget()
+        list_widget.setObjectName("listWidget")
+        list_widget.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
+        if layout:
+            layout.insertWidget(1, list_widget)  # Insert after the search box
 
-        # Add checkboxes for available values
-        checkboxes = []
+        # Populate the list_widget with checkable items
         for val in values:
-            cb = QtWidgets.QCheckBox(val)
-            # If a filter is set, check only those in the filter; else, check all
+            item = QtWidgets.QListWidgetItem(val)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEnabled | Qt.ItemIsSelectable)
             if current_filter is not None:
-                cb.setChecked(val in current_filter)
+                item.setCheckState(Qt.Checked if val in current_filter else Qt.Unchecked)
             else:
-                cb.setChecked(True)
-            layout.addWidget(cb)
-            checkboxes.append(cb)
+                item.setCheckState(Qt.Checked)
+            list_widget.addItem(item)
+
+        # Spacebar toggling is handled by your CheckableListWidget class
 
         # Hook up buttons
-        dialog.findChild(QtWidgets.QPushButton, "selectAllButton").clicked.connect(
-            lambda: [cb.setChecked(True) for cb in checkboxes]
-        )
-        dialog.findChild(QtWidgets.QPushButton, "clearButton").clicked.connect(
-            lambda: [cb.setChecked(False) for cb in checkboxes]
-        )
+        select_all_btn = dialog.findChild(QtWidgets.QPushButton, "selectAllButton")
+        clear_btn = dialog.findChild(QtWidgets.QPushButton, "clearButton")
+        if select_all_btn:
+            select_all_btn.clicked.connect(lambda: [list_widget.item(i).setCheckState(Qt.Checked) for i in range(list_widget.count())])
+        if clear_btn:
+            clear_btn.clicked.connect(lambda: [list_widget.item(i).setCheckState(Qt.Unchecked) for i in range(list_widget.count())])
 
         # Hook up search box
         search_box = dialog.findChild(QtWidgets.QLineEdit, "searchBox")
         if search_box:
-            search_box.textChanged.connect(
-                lambda text: [cb.setVisible(text.lower() in cb.text().lower()) for cb in checkboxes]
-            )
+            def filter_items(text):
+                for i in range(list_widget.count()):
+                    item = list_widget.item(i)
+                    item.setHidden(text.lower() not in item.text().lower())
+            search_box.textChanged.connect(filter_items)
 
         # Dialog button signals
         button_box = dialog.findChild(QtWidgets.QDialogButtonBox, "buttonBox")
@@ -260,9 +285,9 @@ class FilterManager:
             button_box.rejected.connect(dialog.reject)
 
         if dialog.exec_() == QtWidgets.QDialog.Accepted:
-            selected = {cb.text() for cb in checkboxes if cb.isChecked()}
-            if selected and len(selected) < len(checkboxes):
-                self._column_filters[col_name] = selected
+            checked_values = {list_widget.item(i).text() for i in range(list_widget.count()) if list_widget.item(i).checkState() == Qt.Checked}
+            if checked_values and len(checked_values) < list_widget.count():
+                self._column_filters[col_name] = checked_values
             else:
                 self._column_filters.pop(col_name, None)
                 self._filter_value_pool.pop(col_name, None)  # Remove pool if filter is cleared
@@ -317,6 +342,7 @@ class FilterManager:
             
 
 class WorkAllocationPortalViewerDialog(QDialog):
+
     columns = {
        '"public"."production_inputs"': [
             "geom", "s_no","project","wu_received_date","work_unit_id","length_mi","subcountry","rough_road_type",
@@ -351,13 +377,23 @@ class WorkAllocationPortalViewerDialog(QDialog):
        ]
     }
 
-    def __init__(self, db_handler, user_role, table_name, subcountry=None, emp_id=None, parent=None):
+    DROPDOWN_COLUMNS = {
+        "intersection_type": INTERSECTION_TYPE_VALUES,
+        "turn_maneuver_extraction_type": TURN_MANEUVER_EXTRACTION_TYPE_VALUES,
+        "rfdb_production_status": RFDB_PRODUCTION_STATUS_VALUES,
+        "rfdb_qc_status": RFDB_QC_STATUS_VALUES,
+        "siloc_status": SILOC_STATUS_VALUES,
+        "delivery_status": DELIVERY_STATUS_VALUES,
+    }
+
+    def __init__(self, db_handler, user_role, table_name, subcountry=None, emp_id=None, qgis_layer=None, parent=None):
         super().__init__(parent)
         self.db_handler = db_handler
         self.user_role = user_role
         self.table_name = table_name
         self.subcountry = subcountry
         self.emp_id = emp_id  # <-- set emp_id!
+        self.qgis_layer = qgis_layer
         self.columns = self.columns.get(self.table_name, [])
         self.editable_fields = EDITABLE_FIELDS.get(self.table_name, {}).get(self.user_role, [])
 
@@ -371,6 +407,8 @@ class WorkAllocationPortalViewerDialog(QDialog):
 
         self.ui = Ui_Dialog()
         self.ui.setupUi(self)
+        #self.ui.tableWidget.setEditTriggers(QtWidgets.QAbstractItemView.EditKeyPressed | QtWidgets.QAbstractItemView.SelectedClicked)
+
         self.setWindowTitle("Work Allocation Portal Viewer/Editor")
         self.setWindowFlags(self.windowFlags() | Qt.WindowMinMaxButtonsHint)
         signal_bus.logout_signal.connect(self.cleanup_on_logout)
@@ -434,6 +472,19 @@ class WorkAllocationPortalViewerDialog(QDialog):
         self.pg_listener = PostgresListener(dsn, "production_inputs_update")
         self.pg_listener.notified.connect(self.handle_db_notify)
 
+        self.combo_delegates = {}
+        for col_idx, field_name in enumerate(self.columns):
+            if field_name in self.DROPDOWN_COLUMNS:
+                delegate = ComboBoxDelegate(self.DROPDOWN_COLUMNS[field_name], self.ui.tableWidget)
+                self.ui.tableWidget.setItemDelegateForColumn(col_idx, delegate)
+                self.combo_delegates[field_name] = delegate
+
+        # Date columns (add this block)
+        date_delegate = DateDelegate(self.ui.tableWidget)
+        for col_idx, field_name in enumerate(self.columns):
+            if field_name in DATE_COLUMNS:
+                self.ui.tableWidget.setItemDelegateForColumn(col_idx, date_delegate)
+
     def create_filter(self):
         """Toggles the filter UI."""
         self.filter_manager.create_filter()
@@ -470,15 +521,17 @@ class WorkAllocationPortalViewerDialog(QDialog):
         return selected
 
     def get_filtered_rows_except(self, exclude_col_name):
-        headers = [self.ui.tableWidget.horizontalHeaderItem(i).text().replace(" ▼", "") 
-                   for i in range(self.ui.tableWidget.columnCount())]
+        headers = self.columns  # Use original column names
         filtered_rows = []
         for row in range(self.ui.tableWidget.rowCount()):
             match = True
             for col_name, allowed_values in self.filter_manager._column_filters.items():
                 if col_name == exclude_col_name:
                     continue
-                col_idx = headers.index(col_name)
+                try:
+                    col_idx = headers.index(col_name)
+                except ValueError:
+                    continue  # Skip if column not found
                 item = self.ui.tableWidget.item(row, col_idx)
                 if item is None or item.text() not in allowed_values:
                     match = False
@@ -621,83 +674,50 @@ class WorkAllocationPortalViewerDialog(QDialog):
                 self.ui.tableWidget.blockSignals(False)
 
     def handle_cell_changed(self, row, col):
-        #print(f"[HANDLE CELL CHANGED] ({row}, {col}) called. _is_undo_redo={getattr(self, '_is_undo_redo', False)}, _is_group_paste={getattr(self, '_is_group_paste', False)}")
         item = self.ui.tableWidget.item(row, col)
         if item is None:
+            print(f"[DEBUG] handle_cell_changed: No item at ({row}, {col})")
             return
 
-        new_value = item.text()
+        widget = self.ui.tableWidget.cellWidget(row, col)
+        if isinstance(widget, QComboBox):
+            new_value = widget.currentText()
+        else:
+            new_value = item.text()
+
         field_name = self.columns[col]
         col_type = self.col_types.get(field_name, "").lower()
 
-        if col_type in ("integer", "bigint", "numeric", "double precision", "date", "timestamp without time zone") and (not new_value or not new_value.strip()):
+        if (
+            new_value is None
+            or str(new_value).strip() == ""
+            or str(new_value).strip().lower() == "none"
+        ):
             new_value = None
 
         prev_value = self._cell_prev_values.get((row, col), "")
-        #print(f"[EDIT] Cell ({row}, {col}) prev value: {prev_value}, new value: {new_value}")
+        print(f"[DEBUG] handle_cell_changed: ({row}, {col}) field='{field_name}' prev='{prev_value}' new='{new_value}'")
+
         if prev_value == new_value:
+            print(f"[DEBUG] handle_cell_changed: No change detected for ({row}, {col})")
             return
 
         if not getattr(self, "_is_undo_redo", False) and not getattr(self, "_is_group_paste", False):
-            self.undo_stack.push(CellEditCommand(self, row, col, prev_value, new_value))
-
-        # --- Handle emp_id autofill ---
-        if field_name in EMP_ID_TO_NAME_FIELDS:
-            emp_id = new_value
-            if emp_id:
-                try:
-                    cur = self.db_handler.conn.cursor()
-                    cur.execute("SELECT employee_name FROM public.employee WHERE employee_id = %s", (emp_id,))
-                    result = cur.fetchone()
-                    cur.close()
-
-                    if not result:
-                        if not self._suppress_invalid_empid_popup:
-                            QMessageBox.critical(self, "Invalid Employee ID", f"Employee ID '{emp_id}' not found.")
-                        self.ui.tableWidget.blockSignals(True)
-                        item.setText(str(prev_value) if prev_value else "")
-                        self.ui.tableWidget.blockSignals(False)
-                        return
-
-                    emp_name = result[0]
-                    name_field = EMP_ID_TO_NAME_FIELDS[field_name]
-                    if name_field in self.columns:
-                        name_col = self.columns.index(name_field)
-                        name_item = self.ui.tableWidget.item(row, name_col)
-                        if name_item is None:
-                            name_item = QTableWidgetItem("")
-                            self.ui.tableWidget.setItem(row, name_col, name_item)
-                        # Block signals to avoid recursion
-                        self.ui.tableWidget.blockSignals(True)
-                        name_item.setText(emp_name)
-                        self.ui.tableWidget.blockSignals(False)
-                        # Update DB for both ID and name fields
-                        s_no_item = self.ui.tableWidget.item(row, self.columns.index("s_no"))
-                        if s_no_item and s_no_item.text():
-                            s_no = s_no_item.text()
-                            try:
-                                cur = self.db_handler.conn.cursor()
-                                cur.execute(
-                                    f"UPDATE {self.quoted_table} SET {field_name} = %s, {name_field} = %s WHERE s_no = %s",
-                                    (emp_id, emp_name, s_no)
-                                )
-                                self.db_handler.conn.commit()
-                                cur.execute(f"NOTIFY production_inputs_update, '{s_no}';")
-                                cur.close()
-                            except Exception as e:
-                                QMessageBox.critical(self, "Update Error", f"Failed to update {field_name} or {name_field}: {e}")
-                                self.refresh_table()
-                except Exception as e:
-                    QMessageBox.critical(self, "DB Error", f"Error looking up employee name: {e}")
-            return  # Skip generic update logic for emp_id
+            s_no_item = self.ui.tableWidget.item(row, self.columns.index("s_no"))
+            if s_no_item:
+                s_no = s_no_item.text()
+                col_name = self.columns[col]
+                self.undo_stack.push(CellEditCommand(self, s_no, col_name, prev_value, new_value))
 
         # --- Normal field update ---
         s_no_item = self.ui.tableWidget.item(row, self.columns.index("s_no"))
         if not s_no_item or not s_no_item.text():
+            print(f"[DEBUG] handle_cell_changed: No s_no found for row {row}")
             return
 
         s_no = s_no_item.text()
         try:
+            print(f"[DEBUG] handle_cell_changed: Updating DB: field={field_name}, value={new_value}, s_no={s_no}")
             cur = self.db_handler.conn.cursor()
             cur.execute(
                 f"UPDATE {self.quoted_table} SET {field_name} = %s WHERE s_no = %s",
@@ -706,7 +726,9 @@ class WorkAllocationPortalViewerDialog(QDialog):
             self.db_handler.conn.commit()
             cur.execute(f"NOTIFY production_inputs_update, '{s_no}';")
             cur.close()
+            print(f"[DEBUG] handle_cell_changed: DB update successful for s_no={s_no}, field={field_name}")
         except Exception as e:
+            print(f"[DEBUG] handle_cell_changed: DB update failed: {e}")
             QMessageBox.critical(self, "Update Error", f"Failed to update {field_name}: {e}")
             self.refresh_table()
 
@@ -750,6 +772,14 @@ class WorkAllocationPortalViewerDialog(QDialog):
             col_in_clip = i % num_clip_cols
             new_value = rows[row_in_clip][col_in_clip % len(rows[row_in_clip])]
             col_idx = self.columns.index(col_name)
+
+            # --- Dropdown value validation ---
+            if col_name in self.DROPDOWN_COLUMNS:
+                allowed = self.DROPDOWN_COLUMNS[col_name] + [""]
+                if new_value not in allowed:
+                    continue  # Skip invalid value
+            # ---------------------------------
+
             for row in range(self.ui.tableWidget.rowCount()):
                 s_no_item = self.ui.tableWidget.item(row, s_no_idx)
                 if s_no_item and s_no_item.text() == s_no:
@@ -797,6 +827,25 @@ class WorkAllocationPortalViewerDialog(QDialog):
                 return True
             elif key == Qt.Key_Y and modifiers & Qt.ControlModifier:
                 self.redo()
+                return True
+            elif key in (Qt.Key_Delete, Qt.Key_Backspace):
+                # Collect all edits for group undo/redo
+                group_edits = []
+                for item in self.ui.tableWidget.selectedItems():
+                    row, col = item.row(), item.column()
+                    if self.is_cell_editable(row, col):
+                        prev_value = item.text()
+                        # Always process, even if prev_value is "" or "None"
+                        item.setText("")
+                        self.handle_cell_changed(row, col)  # Update DB immediately
+                        s_no_item = self.ui.tableWidget.item(row, self.columns.index("s_no"))
+                        if s_no_item:
+                            s_no = s_no_item.text()
+                            col_name = self.columns[col]
+                            group_edits.append((s_no, col_name, prev_value, ""))
+                            
+                if group_edits:
+                    self.undo_stack.push(GroupEditCommand(self, group_edits))
                 return True
         return super().eventFilter(obj, event)
 
@@ -954,24 +1003,6 @@ class WorkAllocationPortalViewerDialog(QDialog):
 
         list_widget.itemChanged.connect(on_item_changed)
 
-    # def zoom_to_feature(self):
-    #     """Allow user to search for a value in any column and zoom to its row."""
-    #     cols = [self.ui.tableWidget.horizontalHeaderItem(i).text().replace(" ▼", "") for i in range(self.ui.tableWidget.columnCount())]
-    #     col, ok = QtWidgets.QInputDialog.getItem(self, "Find Feature", "Select column to search:", cols, 0, False)
-    #     if not ok or not col:
-    #         return
-    #     value, ok_val = QtWidgets.QInputDialog.getText(self, "Find", f"Enter value to find in '{col}':")
-    #     if not ok_val or not value:
-    #         return
-    #     col_idx = cols.index(col)
-    #     for row in range(self.ui.tableWidget.rowCount()):
-    #         item = self.ui.tableWidget.item(row, col_idx)self.ui.Zoom
-    #         if item and item.text() == value:
-    #             self.ui.tableWidget.selectRow(row)
-    #             self.ui.tableWidget.scrollToItem(item)
-    #             return
-    #     QMessageBox.information(self, "Not Found", f"'{value}' not found in column '{col}'.")
-
     def zoom_to_selected_row_on_map(self):
         """Zoom QGIS map canvas to the geometry of the selected row in the table."""
         # Get the selected row
@@ -988,30 +1019,52 @@ class WorkAllocationPortalViewerDialog(QDialog):
             QMessageBox.warning(self, "Zoom", "Could not determine the selected row's s_no.")
             return
         s_no = s_no_item.text()
+        print(f"[DEBUG] Zoom requested for s_no: {s_no}")
 
-        # Find the corresponding feature in the QGIS layer
-        # You need to know the layer name or keep a reference to it
-        from qgis.core import QgsProject
-        layer_name = self.table_name.replace('"public".', '').replace('"', '')  # e.g., tm_production_inputs
-        layer = None
-        for lyr in QgsProject.instance().mapLayers().values():
-            if lyr.name().startswith(layer_name):
-                layer = lyr
-                break
+        # Use the stored QGIS layer reference
+        layer = self.qgis_layer
         if not layer:
-            QMessageBox.warning(self, "Zoom", f"Layer '{layer_name}' not found in QGIS.")
+            QMessageBox.warning(self, "Zoom", "Editable layer not found in QGIS.")
             return
+
+        print(f"[DEBUG] Using layer: {layer.name()}")
 
         # Find the feature by s_no
         expr = f'"s_no" = {s_no}'
         features = layer.getFeatures(expr)
         feature = next(features, None)
-        if not feature or not feature.hasGeometry():
+        if not feature:
+            QMessageBox.warning(self, "Zoom", f"No feature found in layer for s_no={s_no}.")
+            return
+        if not feature.hasGeometry():
             QMessageBox.warning(self, "Zoom", "Feature geometry not found for the selected row.")
             return
+        
+        geom = feature.geometry()
+        bbox = geom.boundingBox()
+        # Transform bbox to map CRS if needed
+        layer_crs = layer.crs()
+        map_crs = QgsProject.instance().crs()
+        if layer_crs != map_crs:
+            transform = QgsCoordinateTransform(layer_crs, map_crs, QgsProject.instance())
+            bbox = transform.transformBoundingBox(bbox)
+        # If geometry is a point, expand the bbox a bit
+        if geom.type() == 0:  # 0 = Point
+            buffer = 0.0005  # Adjust as needed for your CRS
+            bbox = QgsRectangle(
+                bbox.xMinimum() - buffer, bbox.yMinimum() - buffer,
+                bbox.xMaximum() + buffer, bbox.yMaximum() + buffer
+            )
 
-        # Zoom to the feature
-        from qgis.utils import iface
+        iface.mapCanvas().setExtent(bbox)
+        iface.mapCanvas().refresh()
+
+        # Select the feature in the layer
+        layer.removeSelection()
+        layer.selectByIds([feature.id()])
+
+        print(f"[DEBUG] Feature found, geometry: {feature.geometry().asWkt()[:100]}...")
+
         iface.mapCanvas().setExtent(feature.geometry().boundingBox())
         iface.mapCanvas().refresh()
 
@@ -1031,24 +1084,23 @@ class WorkAllocationPortalViewerDialog(QDialog):
                     if item:
                         item.setSelected(True)
 
-class UndoRedoDelegate(QStyledItemDelegate):
-    def __init__(self, parent, prev_value_dict):
-        super().__init__(parent)
-        self.prev_value_dict = prev_value_dict
+    def filter_to_snos(self, s_no_list):
+        """Show only rows with s_no in s_no_list. If list is empty, show nothing."""
+        if not hasattr(self, 'columns') or not hasattr(self.ui, 'tableWidget'):
+            return
+        if "s_no" not in self.columns:
+            return
+        s_no_set = set(map(str, s_no_list))
+        s_no_idx = self.columns.index("s_no")
+        for row in range(self.ui.tableWidget.rowCount()):
+            s_no_item = self.ui.tableWidget.item(row, s_no_idx)
+            if not s_no_item or s_no_item.text() not in s_no_set:
+                self.ui.tableWidget.setRowHidden(row, True)
+            else:
+                self.ui.tableWidget.setRowHidden(row, False)
+        # If no selection, hide all rows
+        if not s_no_set:
+            for row in range(self.ui.tableWidget.rowCount()):
+                self.ui.tableWidget.setRowHidden(row, True)
 
-    def flags(self, index):
-        row = index.row()
-        col = index.column()
-        dialog = self.parent().parent()
-        if hasattr(dialog, "is_cell_editable") and dialog.is_cell_editable(row, col):
-            return Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable
-        else:
-            return Qt.ItemIsSelectable | Qt.ItemIsEnabled
 
-    def createEditor(self, parent, option, index):
-        row = index.row()
-        col = index.column()
-        value = index.model().data(index)
-        self.prev_value_dict[(row, col)] = value
-        #print(f"[DELEGATE PRE-EDIT] Cell ({row}, {col}) previous value: {value}")
-        return super().createEditor(parent, option, index)

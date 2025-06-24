@@ -62,10 +62,22 @@ class DbHandler:
                 password=self.password
             )
             logger.info("Connected to DB: %s", self.config["dbname"])
+            # Set session variable after connection
+            if hasattr(self, "emp_id") and self.emp_id:
+                self.set_session_emp_id(self.username)
         except psycopg2.Error as e:
             logger.error("DB connection failed: %s", e)
             raise
         return self.conn
+    
+    def set_session_emp_id(self, emp_id):
+        """Set the session variable for the current user's employee ID."""
+        if not self.conn or self.conn.closed:
+            raise NotConnectedException("Not connected to the database.")
+        with self.conn.cursor() as cur:
+            cur.execute("SET app.current_user_emp_id = %s", (str(emp_id),))
+            self.conn.commit()
+        logger.info("Session variable app.current_user_emp_id set to %s", emp_id)
 
     def is_connected(self):
         return self.conn is not None and not self.conn.closed

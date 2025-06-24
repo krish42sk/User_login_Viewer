@@ -53,12 +53,12 @@ def is_field_editable(role, field_name, row_data=None, user_emp_id=None, project
     tm_leader_col_map = {
         'rfdb_production_leaders': 'rfdb_production_team_leader_emp_id',
         'rfdb_qc_leaders': 'rfdb_qc_team_leader_emp_id',
-        'rfdb_production_user': 'rfdb_production_emp_id',
-        'rfdb_qc_user': 'rfdb_qc_emp_id',
+        'rfdb_production_users': 'rfdb_production_emp_id',
+        'rfdb_qc_users': 'rfdb_qc_emp_id',
         'siloc_qc_leaders': 'siloc_team_leader_emp_id',
         'siloc_production_leaders': 'siloc_team_leader_emp_id',
-        'siloc_production_user': 'siloc_emp_id',
-        'siloc_qc_user': 'siloc_emp_id'
+        'siloc_production_users': 'siloc_emp_id',
+        'siloc_qc_users': 'siloc_emp_id'
     }
 
     # Select the correct map based on project

@@ -3,10 +3,10 @@
 # This file should be included when you package your plugin.# Mandatory items:
 
 [general]
-name=UserLoginViewer
+name=WorkAllocationPortal
 qgisMinimumVersion=3.22
 description=A plugin to log in and show user-specific data from a PostgreSQL database
-version=1.9.6
+version=1.9.44
 author=EDR CONTINUOUS INFORMATION PVT. LTD.
 email=edr@edrinfo.com
 
