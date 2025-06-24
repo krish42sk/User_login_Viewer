@@ -530,7 +530,7 @@ class WorkAllocationPortalViewerDialog(QDialog):
 
             updated_dict = {self.columns[c]: row_data[c] for c in range(len(self.columns))}
 
-            # Update the model row if s_no matches
+          
             for row in range(self.model.rowCount()):
                 index = self.model.index(row, self.columns.index("s_no"))
                 s_no_value = self.model.data(index, Qt.DisplayRole)
