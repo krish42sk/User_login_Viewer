@@ -511,6 +511,7 @@ class CustomAttributeTable(QFrame):
     
     class ClipboardManager:
         """Handles copy-paste operations with undo/redo support using Qt clipboard."""
+        
         def __init__(self, table_widget, editable_fields):
             self.tableWidget = table_widget
             self.editable_fields = editable_fields
@@ -518,31 +519,41 @@ class CustomAttributeTable(QFrame):
             self.redo_stack = []
 
         def copy_selection(self):
+            """Copy selected cells to clipboard."""
             selected = self.tableWidget.selectedIndexes()
             if not selected:
                 return
+
             rows = sorted(set(idx.row() for idx in selected))
             cols = sorted(set(idx.column() for idx in selected))
             text = ""
+
             for r in rows:
                 line = []
                 for c in cols:
                     item = self.tableWidget.item(r, c)
                     line.append(item.text() if item else "")
                 text += "\t".join(line) + "\n"
+
             QApplication.clipboard().setText(text.strip())
 
         def paste_selection(self):
-            text = QApplication.clipboard().text()
+            """Paste clipboard contents into selected cells."""
+            text = QApplication.clipboard().text().strip()
             if not text:
                 return
+
             start_indexes = self.tableWidget.selectedIndexes()
             if not start_indexes:
                 return
-            start_row, start_col = start_indexes[0].row(), start_indexes[0].column()
-            rows = [line.split('\t') for line in text.strip().split('\n')]
 
-            # If only one cell copied, fill all selected cells
+            start_row, start_col = start_indexes[0].row(), start_indexes[0].column()
+            rows = [line.split('\t') for line in text.split('\n')]
+
+            batch_undo = []
+            single_action = None
+
+            # Single-cell copy, paste to multiple cells
             if len(rows) == 1 and len(rows[0]) == 1 and len(start_indexes) > 1:
                 value = rows[0][0]
                 for idx in start_indexes:
@@ -551,11 +562,13 @@ class CustomAttributeTable(QFrame):
                         item = self.tableWidget.item(idx.row(), idx.column())
                         old_value = item.text() if item else ""
                         self.tableWidget.setItem(idx.row(), idx.column(), QTableWidgetItem(value))
-                        self.undo_stack.append((idx.row(), idx.column(), old_value, value))
-                        self.redo_stack.clear()
+                        batch_undo.append((idx.row(), idx.column(), old_value, value))
+
+                self.undo_stack.append(batch_undo)
+                self.redo_stack.clear()
                 return
 
-            # Otherwise, paste as block
+            # Regular paste operation
             for r, row_vals in enumerate(rows):
                 for c, val in enumerate(row_vals):
                     row_idx, col_idx = start_row + r, start_col + c
@@ -565,28 +578,47 @@ class CustomAttributeTable(QFrame):
                             item = self.tableWidget.item(row_idx, col_idx)
                             old_value = item.text() if item else ""
                             self.tableWidget.setItem(row_idx, col_idx, QTableWidgetItem(val))
-                            self.undo_stack.append((row_idx, col_idx, old_value, val))
-                            self.redo_stack.clear()
+
+                            if len(rows) > 1 or len(row_vals) > 1:
+                                batch_undo.append((row_idx, col_idx, old_value, val))
+                            else:
+                                single_action = (row_idx, col_idx, old_value, val)
+
+            # Track batch vs. single action in undo stack
+            if batch_undo:
+                self.undo_stack.append(batch_undo)
+                self.redo_stack.clear()
+            elif single_action:
+                self.undo_stack.append([single_action])
+                self.redo_stack.clear()
 
         def undo(self):
+            """Undo the last change."""
             if not self.undo_stack:
                 QMessageBox.information(self.tableWidget, "Undo", "Nothing to undo.")
                 return
-            row, col, old_val, new_val = self.undo_stack.pop()
-            item = self.tableWidget.item(row, col)
-            if item:
-                item.setText(old_val)
-                self.redo_stack.append((row, col, new_val, old_val))
+
+            last_batch = self.undo_stack.pop()
+            for row, col, old_val, new_val in last_batch:
+                item = self.tableWidget.item(row, col)
+                if item:
+                    item.setText(old_val)
+
+            self.redo_stack.append(last_batch)
 
         def redo(self):
+            """Redo the last undone action."""
             if not self.redo_stack:
                 QMessageBox.information(self.tableWidget, "Redo", "Nothing to redo.")
                 return
-            row, col, old_val, new_val = self.redo_stack.pop()
-            item = self.tableWidget.item(row, col)
-            if item:
-                item.setText(old_val)
-                self.undo_stack.append((row, col, new_val, old_val))
+
+            last_batch = self.redo_stack.pop()
+            for row, col, old_val, new_val in last_batch:
+                item = self.tableWidget.item(row, col)
+                if item:
+                    item.setText(new_val)
+
+            self.undo_stack.append(last_batch)
 
 class IntSortTableWidgetItem(QTableWidgetItem):
     def __lt__(self, other):
