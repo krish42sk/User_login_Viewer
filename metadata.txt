@@ -6,7 +6,7 @@
 name=UserLoginViewer
 qgisMinimumVersion=3.22
 description=A plugin to log in and show user-specific data from a PostgreSQL database
-version=1.9.7
+version=1.9.6
 author=EDR CONTINUOUS INFORMATION PVT. LTD.
 email=edr@edrinfo.com
 

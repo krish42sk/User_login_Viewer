@@ -1,7 +1,6 @@
-from PyQt5 import uic
 from PyQt5.QtWidgets import (
     QDialog, QLabel, QLineEdit, QComboBox, QPushButton, QHBoxLayout,
-    QVBoxLayout, QMessageBox, QFormLayout, QDialogButtonBox, QFrame, QToolButton, QFileDialog, QTableWidgetItem, QAction, QHeaderView, QAbstractScrollArea
+    QVBoxLayout, QMessageBox, QFormLayout, QDialogButtonBox, QFrame, QToolButton, QFileDialog
 )
 from PyQt5.QtGui import QFont, QIcon
 from PyQt5.QtCore import Qt, pyqtSignal, QObject, QTimer
@@ -9,11 +8,10 @@ import pandas as pd
 import psycopg2
 from qgis.core import QgsVectorLayer, Qgis, QgsProject
 from qgis.utils import iface
-from .db_handler import DbHandler
 from .constants import EDITABLE_FIELDS
-from .custom_attribute_table import CustomAttributeTable
-from .conflict_listener import is_field_editable, show_privilege_error
-
+from .work_allocation_portal_dialog import WorkAllocationPortalViewerDialog
+from .db_handler import DbHandler
+from .conflict_listener import is_field_editable
 import logging
 import sip
 import threading
@@ -22,14 +20,18 @@ from shapely import wkt
 from shapely.geometry import MultiLineString
 import binascii
 import traceback
+from .db_handler import set_shared_db_handler
 
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 
 class LoginDialog(QDialog):
-    login_successful = pyqtSignal(object)  # Accepts db_handler as argument
+    login_successful = pyqtSignal()
     logout_requested = pyqtSignal()
+    portal_viewer_enable = pyqtSignal(bool)
+    
 
     def __init__(self):
         super().__init__()
@@ -40,6 +42,7 @@ class LoginDialog(QDialog):
         self.current_layer = None
         self.conflict_listener = None
         self._is_logging_out = False
+        self.db_handler = None  # Set after login
 
         self.Databases = {
             "RFDB_Server": {
@@ -79,8 +82,30 @@ class LoginDialog(QDialog):
         form_layout = QFormLayout()
 
         self.Database_dropdown = QComboBox()
-        self.Database_dropdown.addItems(["select a Database"] + list(self.Databases.keys()))
-        form_layout.addRow("Database:", self.Database_dropdown)
+        self.Database_dropdown.addItems(["select a Server"] + list(self.Databases.keys()))
+        form_layout.addRow("Server:", self.Database_dropdown)
+
+        # Add table selection dropdown
+        self.table_dropdown = QComboBox()
+        self.table_dropdown.addItems(["select a Project", "rfdb_project", "turn_maneuver_project"])
+        form_layout.addRow("Project:", self.table_dropdown)
+
+        # Store selected table name for later use
+        self.selected_table = None
+
+        # Update selected_table when table_dropdown changes
+        def on_table_changed(index):
+            table_option = self.table_dropdown.currentText()
+            if table_option == "rfdb_project":
+                self.selected_table = '''"public"."production_inputs"'''
+            elif table_option == "turn_maneuver_project":
+                self.selected_table = '''"public"."tm_production_inputs"'''
+            else:
+                self.selected_table = None
+
+        self.table_dropdown.currentIndexChanged.connect(on_table_changed)
+        # Initialize selected_table
+        on_table_changed(self.table_dropdown.currentIndex())
 
         self.emp_id_input = QLineEdit()
         form_layout.addRow("Employee ID:", self.emp_id_input)
@@ -117,12 +142,12 @@ class LoginDialog(QDialog):
         layout.addLayout(button_layout)
 
         # Add after self.button_box in setup_ui
-        self.csv_upload_button = QPushButton()
-        icon_path_2 = os.path.join(os.path.dirname(__file__), 'csv_icon.png')
-        self.csv_upload_button.setIcon(QIcon(icon_path_2))
-        self.csv_upload_button.setText("Upload CSV")
-        self.csv_upload_button.setVisible(False)  # Only show for grand_leaders
-        layout.addWidget(self.csv_upload_button)
+        # self.csv_upload_button = QPushButton()
+        # icon_path_2 = os.path.join(os.path.dirname(__file__), 'csv_icon.png')
+        # self.csv_upload_button.setIcon(QIcon(icon_path_2))
+        # self.csv_upload_button.setText("Upload CSV")
+        # self.csv_upload_button.setVisible(False)  # Only show for grand_leaders
+        # layout.addWidget(self.csv_upload_button)
 
         self.setLayout(layout)
 
@@ -133,7 +158,7 @@ class LoginDialog(QDialog):
         self.button_box.accepted.connect(self.validate_login)
         self.button_box.rejected.connect(self.reject)
         self.reset_button.clicked.connect(self.refresh_layer)
-        self.csv_upload_button.clicked.connect(self.upload_csv_dialog)
+        #self.csv_upload_button.clicked.connect(self.upload_csv_dialog)
 
     def update_designation(self):
             emp_id = self.emp_id_input.text().strip()
@@ -208,25 +233,17 @@ class LoginDialog(QDialog):
 
             conn = self.connect_to_db(Database_name, emp_id, password)
             if conn:
-                success = self.load_editable_layer(self.designation, Database_name, emp_id, password)
-                if success:
-                    QMessageBox.information(self, "Success", "Login and layer loading successful!")
-                    self.db_handler = DbHandler(self.Databases[self.selected_Database], self.emp_id, self.db_password)
-                    self.db_handler.connect()
-                    self.login_successful.emit(self.db_handler)
-                    self.reset_form()
-                    self.accept()
-                    self.csv_upload_button.setVisible(True)
-                else:
-                    QMessageBox.warning(self, "Layer Error", "Connected, but failed to load the layer.")
+                QMessageBox.information(self, "Success", "Login successful!")
+                self.login_successful.emit()
+                self.reset_form()
+                self.accept()
             else:
                 QMessageBox.critical(self, "Connection Error", "Database connection failed.")
             return
-
+               
         # Normal user/leader logic
         self.df["employee_id"] = self.df["employee_id"].astype(str).str.strip()
         self.df["password"] = self.df["password"].astype(str).str.strip()
-        self.df["processed_employee_id"] = self.df["employee_id"]
 
         match = self.df[
             (self.df["employee_id"] == emp_id) &
@@ -234,40 +251,25 @@ class LoginDialog(QDialog):
         ]
 
         if not match.empty:
-            self.designation = str(match.iloc[0]["category"]).lower()  # Ensure this matches EDITABLE_FIELDS keys
+            self.designation = str(match.iloc[0]["category"]).lower()
             self.emp_id = emp_id
             self.db_password = password
             self.selected_Database = Database_name
 
             conn = self.connect_to_db(Database_name, emp_id, password)
             if conn:
-                if self.designation in EDITABLE_FIELDS:
-                    success = self.load_editable_layer(self.designation, Database_name, emp_id, password)
-                    if success and self.current_layer:
-                        self.current_layer.setName(f"{self.designation} (Editable)")
-                else:
-                    # Set layer name to include designation after login
-                    success = self.load_readonly_layer(Database_name, emp_id, password, designation=self.designation)
-                    if success and self.current_layer:
-                        self.current_layer.setName(f"{self.designation} (Read Only)")
-                if success:
-                    QMessageBox.information(self, "Success", "Login and layer loading successful!")
-                    # After successful login, before emitting login_successful:
-                    self.db_config = self.Databases[self.selected_Database]
-                    self.db_user = self.emp_id
-                    self.db_password = self.db_password
-                    self.db_handler = DbHandler(self.Databases[self.selected_Database], self.emp_id, self.db_password)
-                    self.db_handler.connect()
-                    self.login_successful.emit(self.db_handler)
-                    self.reset_form()
-                    self.accept()
-                else:
-                    QMessageBox.warning(self, "Layer Error", "Connected, but failed to load the layer.")
+                # print(f"[DEBUG] self.selected_table: {self.selected_table}")
+                # print(f"[DEBUG] self.designation: {self.designation}")
+                # print(f"[DEBUG] Editable roles: {list(EDITABLE_FIELDS.get(self.selected_table, {}).keys())}")
+                QMessageBox.information(self, "Success", "Login successful!")
+                self.login_successful.emit()
+                self.reset_form()
+                self.accept()
+                
             else:
                 QMessageBox.critical(self, "Connection Error", "Database connection failed.")
         else:
             QMessageBox.warning(self, "Login Failed", "Invalid Employee ID or Password.")
-            self.csv_upload_button.setVisible(False)
             self.password_input.clear()
             logger.warning("Failed login attempt for Employee ID: %s", emp_id)
 
@@ -290,32 +292,45 @@ class LoginDialog(QDialog):
         except Exception as e:
             print(f"Error updating feature: {e}")
 
+
+
     def connect_to_db(self, selected_db, username, password):
         if selected_db not in self.Databases:
             QMessageBox.critical(self, "Error", f"Database '{selected_db}' not found in configuration.")
             return None
+
         config = self.Databases[selected_db]
         db = DbHandler(config, username, password)
+        db.selected_table = self.selected_table
+        self.db_handler = db
+        set_shared_db_handler(self.db_handler)
+
         try:
+            # Get current backend PID and check for other sessions
             current_pid = db.get_current_pid()
             active_sessions = db.get_active_sessions(exclude_pid=current_pid)
         except Exception as e:
-            logger.exception("DB error")
+            logger.exception("DB error during session check")
             QMessageBox.critical(self, "Connection Error", f"Database error:\n{e}")
             db.cleanup()
             return None
 
+        # Handle existing active sessions
         if active_sessions:
             if username.lower() == "postgres":
+                logger.warning(f"Active session exists for superuser '{username}'")
+
                 response = QMessageBox.question(
                     self, "Connection Limit",
-                    f"You are already connected ({len(active_sessions)} session(s)).\n"
-                    "Do you want to end previous session(s) and continue?",
+                    f"You are already connected ({len(active_sessions)} sessions).\n"
+                    "Do you want to terminate them and continue?",
                     QMessageBox.Yes | QMessageBox.No
                 )
+
                 if response == QMessageBox.Yes:
                     try:
                         db.terminate_sessions(active_sessions)
+                        # Re-check to confirm termination
                         if db.get_active_sessions(exclude_pid=current_pid):
                             logger.error("Could not terminate all previous sessions.")
                             QMessageBox.critical(self, "Error", "Could not terminate all previous sessions. Please try again later.")
@@ -332,7 +347,7 @@ class LoginDialog(QDialog):
                     db.cleanup()
                     return None
             else:
-                logger.warning("Active session exists for user %s", username)
+                logger.warning(f"Active session exists for user '{username}'")
                 QMessageBox.warning(
                     self, "Active Session",
                     f"You are already connected ({len(active_sessions)} session(s)).\n"
@@ -341,6 +356,7 @@ class LoginDialog(QDialog):
                 db.cleanup()
                 return None
 
+        # Try final connection
         try:
             self.conn = db.connect()
             logger.info("✅ Connected to %s successfully!", selected_db)
@@ -351,49 +367,96 @@ class LoginDialog(QDialog):
             db.cleanup()
             return None
 
+
     def load_editable_layer(self, designation, selected_db, username, password):
         config = self.Databases[selected_db]
+        quoted_tbl = self.selected_table
+        print(f"[DEBUG] Loading layer from table: {quoted_tbl}")  # <-- Add this line
         uri = (
-            f"dbname='{config['dbname']}' host={config['host']} port={config['port']} "
-            f"user='{username}' password='{password}' key='work_unit_id' sslmode=disable "
-            f'table="public"."production_input" (geom) sql='
-        )
-        # Set layer name with designation and (Editable)
-        layer_name = f"{designation} (Editable)"
-        layer = QgsVectorLayer(uri, layer_name, "postgres")
+                f"dbname='{config['dbname']}' host={config['host']} port={config['port']} "
+                f"user='{username}' password='{password}' key='work_unit_id' sslmode=disable "
+                f'table={quoted_tbl}(geom) sql='
+            )
 
+        layer = QgsVectorLayer(uri, "{designation}(Editable)", "postgres")
+        layer = QgsVectorLayer(uri, f"{designation}(Editable)", "postgres")
         if layer.isValid():
             QgsProject.instance().addMapLayer(layer)
+            self.sort_attribute_table_by_sno(layer)
             self.current_layer = layer
-            if "_leaders" in self.designation:
-                # Do NOT call self.show_custom_attribute_table() here
-                return True
-            else:
-                self.show_custom_attribute_table()
-                return True
+            # Attach conflict listener
+            self.conflict_listener = ConflictListener(layer, self)
+            # Always sort after any edit
+            layer.committedAttributeValuesChanges.connect(lambda *args: self.sort_attribute_table_by_sno(layer))
+            layer.committedFeaturesAdded.connect(lambda *args: self.sort_attribute_table_by_sno(layer))
+            layer.committedFeaturesRemoved.connect(lambda *args: self.sort_attribute_table_by_sno(layer))
+            # --- Auto-populate Employee Name ---
+            layer.attributeValueChanged.connect(self.on_production_employee_id_changed)
+            return True
         else:
             print("❌ Error loading editable layer: Layer is not valid.")
             return False
 
-    def show_custom_attribute_table(self):
-        if not self.is_logged_in or not getattr(self.login_dialog, "designation", None):
-            QMessageBox.warning(None, "No Role", "User role not set. Please login again.")
+    # Mapping of emp_id fields to their corresponding name fields
+    EMP_ID_TO_NAME_FIELD = {
+        "rfdb_production_emp_id": "rfdb_production_done_by",
+        "siloc_production_emp_id": "siloc_production_done_by",
+        "siloc_qc_emp_id": "siloc_qc_done_by",
+        "rfdb_path_association_production_emp_id": "rfdb_path_association_production_done_by",
+        "rfdb_qc_emp_id": "rfdb_qc_done_by",
+        "rfdb_attri_qc_emp_id": "rfdb_attri_qc_done_by",
+        "rfdb_roadtype_qc_emp_id": "rfdb_roadtype_qc_done_by",
+        "rfdb_qa_emp_id": "rfdb_qa_done_by",
+        "rfdb_path_association_qc_emp_id": "rfdb_path_association_qc_done_by"
+    }
+
+    def on_production_employee_id_changed(self, fid, attr_map):
+        layer = self.current_layer
+        if not layer or not layer.isValid():
+            print("Layer is not valid or not set.")
             return
-        if not hasattr(self, "db_handler") or self.db_handler is None:
-            QMessageBox.critical(None, "DB Error", "Database handler is not set!")
-            return
-        editable_fields = EDITABLE_FIELDS.get(self.login_dialog.designation, [])
-        self.table_frame = CustomAttributeTable(
-            db_handler=self.db_handler,
-            editable_fields=editable_fields,
-            df=getattr(self.login_dialog, "df", None),
-            designation=getattr(self.login_dialog, "designation", None),
-            parent=self.iface.mainWindow()
-        )
-        self.table_frame.show()
-        print("Rows in table:", self.table_frame.tableWidget.rowCount())
+
+        for emp_id_field, name_field in self.EMP_ID_TO_NAME_FIELD.items():
+            if emp_id_field in attr_map:
+                employee_id = attr_map[emp_id_field]
+                try:
+                    feature = layer.getFeature(fid)
+                except Exception as e:
+                    print(f"Error fetching feature: {e}")
+                    continue
+                if feature[name_field] or not employee_id:
+                    continue
+
+                def fetch_and_update(emp_id=employee_id, name_field=name_field, fid=fid):
+                    try:
+                        employee_name = self.fetch_employee_name(emp_id)
+                        if not employee_name:
+                            return
+                        def update_feature():
+                            try:
+                                if not layer.isEditable():
+                                    layer.startEditing()
+                                f = layer.getFeature(fid)
+                                f[name_field] = employee_name
+                                layer.updateFeature(f)
+                                layer.commitChanges()
+                                layer.triggerRepaint()
+                                try:
+                                    dlg = iface.attributeTableDialog(layer)
+                                    if dlg:
+                                        dlg.reload()
+                                except Exception as e:
+                                    print(f"Attribute table refresh error: {e}")
+                            except Exception as e:
+                                print(f"Error updating feature: {e}")
+                        QTimer.singleShot(0, update_feature)
+                    except Exception as e:
+                        print(f"Error fetching employee name for {emp_id_field}: {e}")
+
+                threading.Thread(target=fetch_and_update).start()
 
     def load_readonly_layer(self, selected_db, username, password, designation):
+        print(f"[DEBUG] Loading read-only layer for {designation} from table: \"public\".\"users_views\"")
         try:
             config = self.Databases[selected_db]
             uri = (
@@ -401,9 +464,7 @@ class LoginDialog(QDialog):
                 f"user='{username}' password='{password}' key='work_unit_id' sslmode=disable "
                 f'table="public"."users_views" (geom) sql='
             )
-            # Set layer name with designation and (Read Only)
-            layer_name = f"{designation} (Read Only)"
-            layer = QgsVectorLayer(uri, layer_name, "postgres")
+            layer = QgsVectorLayer(uri, f"{designation} (Read Only)", "postgres")
 
             if layer.isValid():
                 layer.setReadOnly(True)
@@ -451,7 +512,7 @@ class LoginDialog(QDialog):
                         self.conn.close()
                         self.conn = None
                     self.reset_form()  # Clear form fields
-                    QMessageBox.information(self, "Logout", "Logged out and disconnected from database.")
+                    QMessageBox.information(self, "Layers Removed", "Logged out and disconnected from database.")
                     self.logout_requested.emit()
                     self._is_logging_out = False
             else:
@@ -463,14 +524,15 @@ class LoginDialog(QDialog):
                 self.conn.close()
                 self.conn = None
             self.reset_form()
-            QMessageBox.information(self, "Logout", "Logged out and disconnected from database.")
+            QMessageBox.information(self, "Layers Removed", "Logged out and disconnected from database.")
             self.logout_requested.emit()
             self._is_logging_out = False
 
-
     def save_edits(self, field_name, value):
-        if not is_field_editable(self.designation, field_name):
-            show_privilege_error(field_name)
+        # Use the shared is_field_editable function
+        table_name = self.selected_table
+        if not is_field_editable(self.designation, field_name, table_name=table_name):
+            QMessageBox.warning(self, "Permission Denied", f"You do not have privilege to edit '{field_name}'.")
             return
         # ...proceed to save the value...
         self.refresh_layer()
@@ -482,15 +544,18 @@ class LoginDialog(QDialog):
 
     def sort_attribute_table_by_sno(self, layer):
         try:
-            idx = layer.fields().indexFromName('S_no')
+            idx = layer.fields().indexFromName('s_no')
             if idx != -1:
-                iface.showAttributeTable(layer)
-                dlg = iface.attributeTableDialog(layer)
-                if dlg:
-                    view = dlg.tableView()
-                    view.sortByColumn(idx, Qt.AscendingOrder)
+                # QGIS Python API does not support programmatically sorting the attribute table UI.
+                # The following is NOT supported and will raise an error in most QGIS versions:
+                # dlg = iface.attributeTableDialog(layer)
+                # if dlg:
+                #     view = dlg.tableView()
+                #     view.sortByColumn(idx, Qt.AscendingOrder)
+                # Instead, users must sort manually in the attribute table UI.
+                pass
             else:
-                print("Field 'S_no' not found for sorting.")
+                print("Field 's_no' not found for sorting.")
         except Exception as e:
             print(f"Error sorting attribute table: {e}")
 
@@ -499,6 +564,7 @@ class LoginDialog(QDialog):
         """Fetch the employee name for a given employee ID from the database."""
         config = self.Databases[self.selected_Database]
         db = DbHandler(config, self.emp_id, self.db_password)
+        db.selected_table = self.selected_table
         try:
             with db.get_cursor_with_retries() as cur:
                 cur.execute("SELECT employee_name FROM public.employee WHERE employee_id = %s", (emp_id,))
@@ -513,226 +579,147 @@ class LoginDialog(QDialog):
         finally:
             db.cleanup()
 
+    #upload_csv_dialog placeholder previous implementation
+
+    def open_portal_viewer(self):
+        dlg = WorkAllocationPortalViewerDialog(self.db_handler, self.designation, self.selected_table, self)
+        dlg.exec_()
+
+
+
+class ConflictListener(QObject):
+    """Listens for edit conflicts and notifies the user."""
+    def __init__(self, layer, parent=None):
+        super().__init__(parent)
+        self.layer = layer
+        self._connected = False
+        self.layer.editingStarted.connect(self.on_editing_started)
+        self.layer.editingStopped.connect(self.on_editing_stopped)
+        self.layer.committedFeaturesAdded.connect(self.on_committed)
+        self.layer.committedFeaturesRemoved.connect(self.on_committed)
+        self.layer.committedAttributeValuesChanges.connect(self.on_committed)
+        # Do NOT connect to editBuffer().committedWithConflicts here!
+
+    def on_editing_started(self):
+        print("Editing started.")
+        edit_buffer = self.layer.editBuffer()
+        if edit_buffer and not self._connected:
+            # if Qgis.QGIS_VERSION_INT >= 33400:  # QGIS 3.34.0 or newer
+            #     edit_buffer.committedWithConflicts.connect(self.on_conflict)
+            #     self._connected = True
+            pass  # Remove this line if your QGIS version supports committedWithConflicts
+
+    def on_editing_stopped(self):
+        print("Editing stopped.")
+        edit_buffer = self.layer.editBuffer()
+        # Remove the following block if your QGIS version does not support committedWithConflicts
+        # if edit_buffer and self._connected:
+        #     try:
+        #         edit_buffer.committedWithConflicts.disconnect(self.on_conflict)
+        #     except Exception:
+        #         pass
+        #     self._connected = False
+
+    def on_committed(self, *args):
+        print("Edits committed.")
+
+    def on_conflict(self, conflicts):
+        QMessageBox.warning(None, "Edit Conflict", "A conflict occurred while saving edits. Please refresh and try again.")
+
+    def handle_logout(self):
+        if hasattr(self, "work_allocation_dialog") and self.work_allocation_dialog is not None:
+            self.work_allocation_dialog.close()
+            self.work_allocation_dialog = None
+
     def upload_csv_dialog(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select CSV File", "", "CSV Files (*.csv)")
-        if not file_path:
-            return
+        options = QFileDialog.Options()
+        options |= QFileDialog.ReadOnly
+        file_name, _ = QFileDialog.getOpenFileName(self, "Open CSV File", "", "CSV Files (*.csv);;All Files (*)", options=options)
+        if file_name:
+            self.process_csv_file(file_name)
 
-        mandatory_columns = [
-            "geom", "s_no", "project", "wu_received_date", "work_unit_id",
-            "length_mi", "subcountry", "rough_road_type"
-        ]
-
+    def process_csv_file(self, file_path):
         try:
+            # Read the CSV file
             df = pd.read_csv(file_path)
+            if df.empty:
+                QMessageBox.warning(self, "Empty CSV", "The selected CSV file is empty.")
+                return
+
+            # Show a preview dialog
+            preview_dialog = QDialog(self)
+            preview_dialog.setWindowTitle("CSV Preview")
+            layout = QVBoxLayout(preview_dialog)
+
+            table_view = QTableView(preview_dialog)
+            model = PandasModel(df)
+            table_view.setModel(model)
+            layout.addWidget(table_view)
+
+            # Add a button to confirm import
+            button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, preview_dialog)
+            layout.addWidget(button_box)
+
+            button_box.accepted.connect(preview_dialog.accept)
+            button_box.rejected.connect(preview_dialog.reject)
+
+            preview_dialog.resize(800, 600)
+            preview_dialog.exec_()
+
+            # If accepted, proceed with the import
+            if preview_dialog.result() == QDialog.Accepted:
+                self.import_csv_data(df)
         except Exception as e:
-            logger.exception("Failed to read CSV")
-            QMessageBox.critical(self, "CSV Error", f"Failed to read CSV:\n{e}")
+            QMessageBox.critical(self, "Error", f"An error occurred while processing the CSV file:\n{e}")
+
+    def import_csv_data(self, df):
+        if self.db_handler is None:
+            QMessageBox.warning(self, "Database Error", "Not connected to any database.")
             return
 
-        # Check mandatory columns
-        missing = [col for col in mandatory_columns if col not in df.columns]
-        if missing:
-            QMessageBox.critical(self, "CSV Error", f"Missing columns: {', '.join(missing)}")
+        # Basic validation: Check for required columns
+        required_columns = ["geom", "s_no", "project", "wu_received_date", "work_unit_id", "length_mi", "subcountry", "rough_road_type"]
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            QMessageBox.warning(self, "CSV Validation", f"The CSV file is missing the following required columns:\n{', '.join(missing_columns)}")
             return
 
-        # Check not null
-        for col in mandatory_columns:
-            if df[col].isnull().any():
-                QMessageBox.critical(self, "CSV Error", f"Column '{col}' contains null values.")
-                return
+        # Confirm with the user before truncating
+        response = QMessageBox.question(
+            self, "Confirm Truncate",
+            "This action will truncate the existing data in the table. Do you want to continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
 
-        # Check geom column is WKT and convert to WKB (MultiLineString, 4326)
-        wkb_geoms = []
-        for idx, wkt_str in enumerate(df["geom"]):
+        if response == QMessageBox.Yes:
             try:
-                geom = wkt.loads(wkt_str)
-                if not isinstance(geom, MultiLineString):
-                    raise ValueError("Geometry is not MultiLineString")
-                # WKB hex, SRID 4326
-                wkb_hex = binascii.hexlify(geom.wkb).decode()
-                wkb_geoms.append(wkb_hex)
+                # Truncate the existing data in the table
+                tbl = self.selected_table if self.selected_table else '"public"."production_inputs"'
+                with self.db_handler.get_cursor_with_retries() as cur:
+                    cur.execute(f"TRUNCATE TABLE {tbl} CASCADE")
+                    self.db_handler.conn.commit()
+                QMessageBox.information(self, "Success", "Existing data truncated successfully.")
             except Exception as e:
-                QMessageBox.critical(self, "CSV Error", f"Row {idx+1}: Invalid geometry: {e}")
+                QMessageBox.critical(self, "Error", f"Failed to truncate table:\n{e}")
                 return
-        df["geom_wkb"] = wkb_geoms
 
-        # Connect as admin/superuser
-        config = self.Databases[self.selected_Database]
-        db = DbHandler(config, self.emp_id, self.db_password)
+        # Insert the new data
         try:
-            with db.get_cursor_with_retries() as cur:
-                # Check s_no and work_unit_id uniqueness
-                cur.execute("SELECT s_no, work_unit_id FROM public.production_input")
-                existing = cur.fetchall()
-                existing_sno = set(row[0] for row in existing)
-                existing_wu = set(row[1] for row in existing)
-                for idx, row in df.iterrows():
-                    if row["s_no"] in existing_sno:
-                        QMessageBox.critical(self, "CSV Error", f"s_no '{row['s_no']}' already exists.")
-                        return
-                    if row["work_unit_id"] in existing_wu:
-                        QMessageBox.critical(self, "CSV Error", f"work_unit_id '{row['work_unit_id']}' already exists.")
-                        return
-
-                # Insert rows
-                for idx, row in df.iterrows():
-                    cur.execute("""
-                        INSERT INTO public.production_input
-                        (geom, s_no, Database, wu_received_date, work_unit_id, length_mi, subcountry, rough_road_type)
+            tbl = self.selected_table if self.selected_table else '"public"."production_inputs"'
+            with self.db_handler.get_cursor_with_retries() as cur:
+                for _, row in df.iterrows():
+                    cur.execute(f"""
+                        INSERT INTO {tbl}
+                        (geom, s_no, project, wu_received_date, work_unit_id, length_mi, subcountry, rough_road_type)
                         VALUES (
                             ST_SetSRID(ST_GeomFromWKB(decode(%s, 'hex')), 4326),
                             %s, %s, %s, %s, %s, %s, %s
                         )
-                    """, (
-                        row["geom_wkb"], row["s_no"], row["Database"], row["wu_received_date"],
-                        row["work_unit_id"], row["length_mi"], row["subcountry"], row["rough_road_type"]
-                    ))
-                db.conn.commit()
+                    """, (row["geom"], row["s_no"], row["project"], row["wu_received_date"], row["work_unit_id"], row["length_mi"], row["subcountry"], row["rough_road_type"]))
+                self.db_handler.conn.commit()
+            QMessageBox.information(self, "Success", "Data imported successfully.")
         except Exception as e:
-            db.conn.rollback()
-            logger.exception("CSV upload failed")
-            QMessageBox.critical(self, "Upload Error", f"Failed to upload CSV:\n{e}")
-        finally:
-            db.cleanup()
-
-    def add_csv_toolbar_action(self):
-        if hasattr(self, 'csv_action') and self.csv_action:
-            return
-        icon_path = os.path.join(os.path.dirname(__file__), 'csv_icon.png')
-        self.csv_action = QAction(QIcon(icon_path), "Upload CSV", iface.mainWindow())
-        self.csv_action.triggered.connect(self.on_csv_icon_triggered)
-        iface.addPluginToMenu("CSV", self.csv_action)
-        iface.addToolBarIcon(self.csv_action)
-
-    def add_leader_toolbar_action(self):
-        if hasattr(self, 'leader_action') and self.leader_action:
-            return
-        icon_path = os.path.join(os.path.dirname(__file__), 'table.png')
-        self.leader_action = QAction(QIcon(icon_path), "Open Attribute Table", iface.mainWindow())
-        self.leader_action.triggered.connect(self.on_table_icon_triggered)
-        iface.addPluginToMenu("Leader Tools", self.leader_action)
-        iface.addToolBarIcon(self.leader_action)
-        
-    def remove_csv_toolbar_action(self):
-        if hasattr(self, 'csv_action') and self.csv_action:
-            iface.removePluginMenu("CSV", self.csv_action)
-            iface.removeToolBarIcon(self.csv_action)
-            self.csv_action = None
-
-    def remove_leader_toolbar_action(self):
-        if hasattr(self, 'leader_action') and self.leader_action:
-            iface.removePluginMenu("Leader Tools", self.leader_action)
-            iface.removeToolBarIcon(self.leader_action)
-            self.leader_action = None
-    def on_table_icon_triggered(self):
-        if not hasattr(self, "db_handler") or self.db_handler is None:
-            QMessageBox.warning(self, "No DB", "No database handler available.")
-            return
-        editable_fields = EDITABLE_FIELDS.get(self.designation, [])
-        from .custom_attribute_table import CustomAttributeTable
-        dlg = CustomAttributeTable(
-            db_handler=self.db_handler,
-            editable_fields=editable_fields,
-            df=getattr(self, "df", None),
-            designation=getattr(self, "designation", None),
-            parent=self
-        )
-        dlg.show()
-
-    def on_csv_icon_triggered(self):
-        if self.designation != "grand_leaders":
-            QMessageBox.warning(self, "Access Denied", "Only grand_leaders can upload CSV.")
-            return
-        self.upload_csv_dialog()
-
-    def handle_login(self):
-        emp_id = self.emp_id_input.text().strip()
-        password = self.password_input.text().strip()
-        Database_name = self.Database_dropdown.currentText()
-
-        if Database_name.lower() == "select a database":
-            QMessageBox.warning(self, "Error", "Please select a valid Database.")
-            return
-
-        if self.df.empty:
-            QMessageBox.warning(self, "Error", "Credentials not loaded.")
-            return
-
-        # Special case for admin and 17224: treat as grand_leaders
-        if emp_id.lower() == "postgres" or emp_id == "17224":
-            self.designation = "grand_leaders"
-            self.emp_id = emp_id
-            self.db_password = password
-            self.selected_Database = Database_name
-
-            conn = self.connect_to_db(Database_name, emp_id, password)
-            if conn:
-                success = self.load_editable_layer(self.designation, Database_name, emp_id, password)
-                if success:
-                    QMessageBox.information(self, "Success", "Login and layer loading successful!")
-                    # Emit db_handler for main plugin/controller
-                    self.db_handler = DbHandler(self.Databases[Database_name], emp_id, password)
-                    self.db_handler.connect()
-                    self.login_successful.emit(self.db_handler)
-                    self.reset_form()
-                    self.accept()
-                    self.csv_upload_button.setVisible(True)
-                else:
-                    QMessageBox.warning(self, "Layer Error", "Connected, but failed to load the layer.")
-            else:
-                QMessageBox.critical(self, "Connection Error", "Database connection failed.")
-            return
-
-        # Normal user/leader logic
-        self.df["employee_id"] = self.df["employee_id"].astype(str).str.strip()
-        self.df["password"] = self.df["password"].astype(str).str.strip()
-        self.df["processed_employee_id"] = self.df["employee_id"]
-
-        match = self.df[
-            (self.df["employee_id"] == emp_id) &
-            (self.df["password"] == password)
-        ]
-
-        if not match.empty:
-            self.designation = str(match.iloc[0]["category"]).lower()  # Ensure this matches EDITABLE_FIELDS keys
-            self.emp_id = emp_id
-            self.db_password = password
-            self.selected_Database = Database_name
-
-            conn = self.connect_to_db(Database_name, emp_id, password)
-            if conn:
-                if self.designation in EDITABLE_FIELDS:
-                    success = self.load_editable_layer(self.designation, Database_name, emp_id, password)
-                    if success and self.current_layer:
-                        self.current_layer.setName(f"{self.designation} (Editable)")
-                else:
-                    # Set layer name to include designation after login
-                    success = self.load_readonly_layer(Database_name, emp_id, password, designation=self.designation)
-                    if success and self.current_layer:
-                        self.current_layer.setName(f"{self.designation} (Read Only)")
-                if success:
-                    QMessageBox.information(self, "Success", "Login and layer loading successful!")
-                    # After successful login, before emitting login_successful:
-                    self.db_config = self.Databases[self.selected_Database]
-                    self.db_user = self.emp_id
-                    self.db_password = self.db_password
-                    self.db_handler = DbHandler(self.Databases[self.selected_Database], self.emp_id, self.db_password)
-                    self.db_handler.connect()
-                    self.login_successful.emit(self.db_handler)
-                    self.reset_form()
-                    self.accept()
-                else:
-                    QMessageBox.warning(self, "Layer Error", "Connected, but failed to load the layer.")
-            else:
-                QMessageBox.critical(self, "Connection Error", "Database connection failed.")
-        else:
-            QMessageBox.warning(self, "Login Failed", "Invalid Employee ID or Password.")
-            self.csv_upload_button.setVisible(False)
-            self.password_input.clear()
-            logger.warning("Failed login attempt for Employee ID: %s", emp_id)
-
-
-
+            QMessageBox.critical(self, "Error", f"Failed to import data:\n{e}")
 
 

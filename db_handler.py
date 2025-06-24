@@ -1,29 +1,54 @@
 import psycopg2
 import logging
 from contextlib import contextmanager
+from PyQt5.QtCore import QObject, pyqtSignal
+
+# Removed erroneous use of 'self' outside of a class or method.
 
 logger = logging.getLogger(__name__)
 
+
+# --- Signal Bus for Logout ---
+class SignalBus(QObject):
+    logout_signal = pyqtSignal()
+
+signal_bus = SignalBus()
+
+
+# --- Singleton Access for Shared DbHandler ---
+_db_handler_instance = None
+
+def set_shared_db_handler(instance):
+    global _db_handler_instance
+    _db_handler_instance = instance
+
+def get_shared_db_handler():
+    return _db_handler_instance
+
+
+# --- Custom Exceptions ---
 class NotConnectedException(Exception):
     pass
 
 class DisconnectedCursor:
     def execute(self, *args, **kwargs):
         raise psycopg2.OperationalError('Server is currently disconnected.')
+
     def __getattr__(self, item):
         raise psycopg2.OperationalError('Server is currently disconnected.')
 
+
+# --- Main DB Handler ---
 class DbHandler:
-    """Only DB connection/session/transaction logic here."""
     def __init__(self, config, username, password):
         self.config = config
         self.username = username
         self.password = password
         self.conn = None
         self.is_cleaned_up = False
+        self.selected_table = None
 
     def connect(self):
-        """Establish and return a psycopg2 connection."""
         if self.is_cleaned_up:
             raise NotConnectedException("Connection cleaned up.")
         if self.conn and not self.conn.closed:
@@ -42,15 +67,16 @@ class DbHandler:
             raise
         return self.conn
 
+    def is_connected(self):
+        return self.conn is not None and not self.conn.closed
+
     def close(self):
-        """Close the DB connection."""
         if self.conn:
             self.conn.close()
             self.conn = None
             logger.info("DB connection closed.")
 
     def cleanup(self):
-        """Cleanup handler and close connection."""
         self.is_cleaned_up = True
         self.close()
 
@@ -84,7 +110,6 @@ class DbHandler:
 
     @contextmanager
     def get_cursor_with_retries(self, retries=2, autocommit=True):
-        """Get a DB cursor with retry logic."""
         for attempt in range(retries):
             try:
                 conn = self.connect()
@@ -94,23 +119,16 @@ class DbHandler:
                 cur.close()
                 break
             except (psycopg2.Error, NotConnectedException) as e:
-                logger.warning("Cursor error: %s (attempt %d/%d)", e, attempt+1, retries)
+                logger.warning("Cursor error: %s (attempt %d/%d)", e, attempt + 1, retries)
                 self.close()
                 if attempt == retries - 1:
                     logger.error("Returning DisconnectedCursor after retries.")
                     yield DisconnectedCursor()
                 else:
                     continue
-            except Exception as e:
-                logger.error("Unexpected error in cursor operation: %s", e)
-                raise
-            finally:
-                if 'cur' in locals() and not cur.closed:
-                    cur.close()
 
     @contextmanager
     def transaction(self):
-        """Context manager for a DB transaction."""
         conn = self.connect()
         try:
             yield conn
@@ -118,12 +136,11 @@ class DbHandler:
             logger.info("Transaction committed.")
         except Exception as e:
             conn.rollback()
-            logger.exception("Transaction rolled back due to: %s", e)
+            logger.error("Transaction rolled back due to: %s", e)
             raise
 
     @contextmanager
     def read_only_transaction(self):
-        """Context manager for a read-only transaction."""
         conn = self.connect()
         try:
             with conn.cursor() as cur:
@@ -133,6 +150,36 @@ class DbHandler:
             logger.info("Read-only transaction committed.")
         except Exception as e:
             conn.rollback()
-            logger.exception("Read-only transaction rolled back: %s", e)
+            logger.error("Read-only transaction rolled back: %s", e)
             raise
 
+    def fetch_work_units(self, table_name, subcountry=None):
+        conn = self.connect()
+        with conn.cursor() as cur:
+            # Handle schema.table or just table
+            if '.' in table_name.replace('"', ''):
+                schema, table = [s.strip('"') for s in table_name.split('.')]
+                base_query = f'SELECT * FROM "{schema}"."{table}"'
+            else:
+                base_query = f'SELECT * FROM "{table_name}"'
+            params = []
+            if subcountry:
+                base_query += " WHERE subcountry = %s"
+                params.append(subcountry)
+            cur.execute(base_query, params)
+            return cur.fetchall()
+
+    def fetch_unique_subcountries(self, table_name):
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT DISTINCT subcountry FROM {table_name}')
+            return [row[0] for row in cur.fetchall() if row[0] is not None]
+
+    def get_dsn(self):
+        return (
+            f"dbname={self.config['dbname']} "
+            f"user={self.username} "
+            f"password={self.password} "
+            f"host={self.config['host']} "
+            f"port={self.config['port']}"
+        )

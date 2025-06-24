@@ -35,29 +35,7 @@
         <height>303</height>
        </rect>
       </property>
-      <layout class="QVBoxLayout" name="checkBoxLayout">
-       <item>
-        <widget class="QCheckBox" name="checkBox1">
-         <property name="text">
-          <string>Dark Chocolate</string>
-         </property>
-        </widget>
-       </item>
-       <item>
-        <widget class="QCheckBox" name="checkBox2">
-         <property name="text">
-          <string>Extra Dark Chocolate</string>
-         </property>
-        </widget>
-       </item>
-       <item>
-        <widget class="QCheckBox" name="checkBox3">
-         <property name="text">
-          <string>Milk Chocolate</string>
-         </property>
-        </widget>
-       </item>
-      </layout>
+      <layout class="QVBoxLayout" name="checkBoxLayout"/>
      </widget>
     </widget>
    </item>
